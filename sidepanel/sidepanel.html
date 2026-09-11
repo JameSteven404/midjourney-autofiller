@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <title>Midjourney Prompt Auto-Filler</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="title-row">
+        <span class="dot"></span>
+        <h1>Midjourney Auto-Filler</h1>
+      </div>
+      <p class="subtitle">Tự động điền &amp; gửi hàng loạt prompt cho Midjourney web.</p>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="control">Điều khiển</button>
+      <button class="tab" data-tab="settings">Cài đặt</button>
+      <button class="tab" data-tab="logs">Nhật ký</button>
+    </nav>
+
+    <section class="tabpanel" id="tab-control">
+      <div class="tab-status" id="tabStatusBar">
+        <span id="tabStatusIcon">⚠</span>
+        <span id="tabStatusText">Chưa gắn tab đích</span>
+        <button id="attachTabQuick" class="ghost small">Gắn tab đang mở</button>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <label>Prompts</label>
+          <div class="card-actions">
+            <label class="fileBtn">
+              .txt / .csv
+              <input type="file" id="importTextFile" accept=".txt,.csv" hidden />
+            </label>
+            <label class="fileBtn">
+              .xlsx
+              <input type="file" id="importXlsxFile" accept=".xlsx,.xls" hidden />
+            </label>
+          </div>
+        </div>
+        <textarea id="pasteArea" rows="5" placeholder="Prompt đầu tiên...&#10;Có thể kéo dài nhiều dòng.&#10;&#10;Prompt thứ hai bắt đầu ở dòng mới."></textarea>
+        <button id="addFromPaste" class="secondary full">+ Thêm vào hàng đợi</button>
+      </div>
+
+      <div class="card grow">
+        <div class="card-header">
+          <label>Hàng đợi prompt</label>
+          <span class="count-badge" id="queueCount">0</span>
+        </div>
+        <ul id="queueList" class="queue-list"></ul>
+        <p class="empty-hint" id="emptyHint">Chưa có prompt nào trong hàng đợi.</p>
+      </div>
+    </section>
+
+    <section class="tabpanel hidden" id="tab-settings">
+      <div class="card">
+        <div class="card-header"><label>Tab đích</label></div>
+        <button id="attachTab" class="secondary full">Gắn tab đang mở</button>
+        <p class="hint" id="attachedInfo"></p>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><label>Thời gian chờ ngẫu nhiên giữa các prompt (giây)</label></div>
+        <div class="range-row">
+          <input type="number" id="delayMin" min="1" max="600" value="5" />
+          <span class="range-sep">→</span>
+          <input type="number" id="delayMax" min="1" max="600" value="15" />
+        </div>
+        <p class="hint">Random hoá thời gian chờ giúp nhịp gửi prompt tự nhiên hơn, giảm rủi ro bị giới hạn tốc độ.</p>
+      </div>
+
+      <div class="card">
+        <div class="toggle-row">
+          <label class="switch">
+            <input type="checkbox" id="autoDownload" />
+            <span class="slider"></span>
+          </label>
+          <label for="autoDownload" class="toggle-label">Tự động tải ảnh xuống Downloads</label>
+        </div>
+        <input type="text" id="downloadSubfolder" placeholder="Thư mục con, VD: midjourney-output" />
+        <p class="hint">Tự động chuyển sang định dạng .png khi tải (ảnh gốc trên Midjourney là .webp). Tên file có kèm ngày giờ để không bị trùng. Chrome chỉ tải được vào bên trong thư mục Downloads mặc định (kèm thư mục con) — muốn đổi ổ đĩa/thư mục khác, đổi Downloads mặc định trong chrome://settings.</p>
+      </div>
+    </section>
+
+    <section class="tabpanel hidden" id="tab-logs">
+      <div class="card grow">
+        <div class="card-header">
+          <label>Nhật ký gỡ lỗi</label>
+          <button id="clearLogs" class="ghost small">Xoá log</button>
+        </div>
+        <div id="logList" class="log-list"></div>
+        <p class="empty-hint" id="emptyLogHint">Chưa có nhật ký nào.</p>
+      </div>
+    </section>
+
+    <p class="run-warning hidden" id="runWarning"></p>
+    <footer class="actionbar">
+      <button id="clearQueue" class="ghost danger">Xoá hết</button>
+      <button id="stopBtn" class="ghost" disabled>Dừng</button>
+      <button id="startBtn" class="primary grow-btn">▶ Chạy</button>
+    </footer>
+  </div>
+
+  <div class="modal-overlay hidden" id="xlsxModalOverlay">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Nhập từ bảng tính</h2>
+        <button id="xlsxModalClose" class="ghost small">✕</button>
+      </div>
+
+      <div class="modal-file-chip">
+        <span>📄</span>
+        <span id="xlsxFileName"></span>
+      </div>
+
+      <label class="modal-field-label">Sheet</label>
+      <select id="xlsxSheetSelect"></select>
+
+      <label class="modal-field-label">Cột chứa prompt</label>
+      <select id="xlsxColumnSelect"></select>
+
+      <div class="modal-preview" id="xlsxPreviewList"></div>
+      <p class="hint" id="xlsxPreviewHint"></p>
+
+      <div class="modal-actions">
+        <button id="xlsxCancelBtn" class="ghost">Huỷ</button>
+        <button id="xlsxImportBtn" class="primary">Nhập <span id="xlsxImportCount">0</span> prompt</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="../lib/xlsx.full.min.js"></script>
+  <script src="sidepanel.js"></script>
+</body>
+</html>
