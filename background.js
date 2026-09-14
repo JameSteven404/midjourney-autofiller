@@ -10,12 +10,27 @@ const DEFAULT_STATE = {
   items: [], // { id, text, status: 'pending'|'running'|'generating'|'done'|'error', note }
   running: false,
   paused: false,
+  continuousMode: false,
   delayMinSeconds: 8,
   delayMaxSeconds: 20,
   tabId: null,
   autoDownload: false,
   downloadSubfolder: "midjourney-output",
   logs: [], // { ts, level: 'info'|'success'|'error', message }
+  // Cấu hình mặc định áp trước khi gửi mỗi batch — field nào null/rỗng thì
+  // giữ nguyên cài đặt hiện có trên Midjourney, không đổi gì cả.
+  defaultSettings: {
+    aspectRatio: null, // 'portrait' | 'square' | 'landscape'
+    modelVersion: null, // 'standard' | 'hd'
+    modelRaw: null, // 'standard' | 'raw'
+    stylization: null, // 0-1000
+    weirdness: null, // 0-3000
+    variety: null, // 0-100
+    speed: null, // 'relax' | 'fast'
+    stealth: null, // 'on' | 'off'
+    videoResolution: null, // 'sd' | 'hd'
+    videoBatchSize: null, // 1 | 2 | 4
+  },
 };
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
@@ -77,47 +92,38 @@ function timestampSlug(date = new Date()) {
   );
 }
 
-// Ảnh trong lưới kết quả của Midjourney là .webp — chuyển sang .png theo yêu
-// cầu bằng OffscreenCanvas + createImageBitmap (đều dùng được trong service
-// worker của Manifest V3, không cần DOM/thẻ <img> hay <canvas> thật).
-async function convertToPngBlob(sourceUrl) {
-  const resp = await fetch(sourceUrl);
-  if (!resp.ok) throw new Error(`Tải ảnh gốc thất bại (HTTP ${resp.status})`);
-  const sourceBlob = await resp.blob();
-  const bitmap = await createImageBitmap(sourceBlob);
-  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(bitmap, 0, 0);
-  return canvas.convertToBlob({ type: "image/png" });
-}
-
+// Việc chuyển .webp sang .png (fetch + canvas) đã được thực hiện NGAY TRONG
+// content script (trang midjourney.com thật) trước khi gửi urls qua đây —
+// xem convertUrlToPngBlobUrl() trong content-scripts/midjourney.js. Lý do dời
+// sang đó: chrome.downloads.download() với "data:" URL (base64) bị Chrome
+// Safe Browsing coi là "chưa xác minh nguồn gốc" nên tải bị treo vĩnh viễn ở
+// dạng file .tmp tên GUID ngẫu nhiên. blob: URL tạo trong context trang thật
+// (có origin đáng tin, tồn tại được vì tab vẫn đang mở) không gặp vấn đề này.
+// Ở đây chỉ còn việc tải trực tiếp các blob: URL đã nhận được, với tên file
+// đúng định dạng mong muốn.
 async function downloadMedia(urls, promptText, subfolder) {
-  if (!urls || urls.length === 0) return { successCount: 0, total: 0 };
+  if (!urls || urls.length === 0) return { successCount: 0, total: 0, errors: [] };
   const base = sanitizeFilename(promptText);
   const stamp = timestampSlug();
   const folder = (subfolder || "").trim().replace(/^[\\/]+|[\\/]+$/g, "");
   let successCount = 0;
+  const errors = [];
 
   for (let i = 0; i < urls.length; i++) {
     const url = urls[i];
     const name = urls.length > 1 ? `${stamp}_${base}_${i + 1}.png` : `${stamp}_${base}.png`;
     const filename = folder ? `${folder}/${name}` : name;
-    let objectUrl = null;
     try {
-      const pngBlob = await convertToPngBlob(url);
-      objectUrl = URL.createObjectURL(pngBlob);
-      await chrome.downloads.download({ url: objectUrl, filename, conflictAction: "uniquify" });
+      const downloadId = await chrome.downloads.download({ url, filename, conflictAction: "uniquify" });
+      if (typeof downloadId !== "number") throw new Error("chrome.downloads.download không trả về downloadId hợp lệ.");
       successCount++;
     } catch (err) {
-      console.warn("Tải/chuyển sang PNG thất bại:", url, err);
-    } finally {
-      if (objectUrl) {
-        // Trì hoãn thu hồi object URL để chắc chắn download đã đọc xong dữ liệu.
-        setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
-      }
+      const msg = String(err && err.message ? err.message : err);
+      console.warn("Tải file thất bại:", url, err);
+      errors.push(msg);
     }
   }
-  return { successCount, total: urls.length };
+  return { successCount, total: urls.length, errors };
 }
 
 function sendToTabRaw(tabId, message) {
@@ -159,10 +165,10 @@ async function sendToTab(tabId, message) {
   }
 }
 
-async function runOnePrompt(text, tabId, requestId) {
+async function runOnePrompt(text, tabId, requestId, settingsConfig) {
   if (!tabId) throw new Error("Chưa chọn tab đích. Mở tab Midjourney rồi bấm 'Gắn tab này'.");
 
-  const response = await sendToTab(tabId, { type: ACTION_TYPE, text, requestId });
+  const response = await sendToTab(tabId, { type: ACTION_TYPE, text, requestId, settingsConfig });
 
   if (!response) {
     throw new Error("Không nhận được phản hồi từ trang. Trang có thể chưa tải xong hoặc sai URL.");
@@ -197,7 +203,7 @@ async function runQueue() {
       // gian ngẫu nhiên đã đặt. Việc theo dõi khi nào ảnh thực sự xong (để
       // cập nhật "Xong" + tự tải file) chạy bất đồng bộ trong content script
       // và báo kết quả về qua message "MJ_JOB_RESULT" (xem handler bên dưới).
-      const result = await runOnePrompt(item.text, state.tabId, item.id);
+      const result = await runOnePrompt(item.text, state.tabId, item.id, state.defaultSettings);
       state = await getState();
       state.items[idx] = {
         ...state.items[idx],
@@ -220,9 +226,13 @@ async function runQueue() {
 
     state = await getState();
     if (!state.running || state.paused) break;
-    const waitMs = randomDelayMs(state.delayMinSeconds || 8, state.delayMaxSeconds || 20);
-    await log("info", `Chờ ${Math.round(waitMs / 1000)}s trước prompt tiếp theo...`);
-    await sleep(waitMs);
+    if (!state.continuousMode) {
+      const waitMs = randomDelayMs(state.delayMinSeconds || 8, state.delayMaxSeconds || 20);
+      await log("info", `Chờ ${Math.round(waitMs / 1000)}s trước prompt tiếp theo...`);
+      await sleep(waitMs);
+    } else {
+      await log("info", "Chế độ liên tục bật: gửi ngay prompt tiếp theo.");
+    }
   }
 
   state = await getState();
@@ -251,9 +261,11 @@ async function handleJobResult(msg) {
     if (result.successCount === result.total) {
       await log("info", `Đã tải ${result.successCount} file PNG.`);
     } else {
+      const uniqueErrors = Array.from(new Set(result.errors || []));
+      const detail = uniqueErrors.length > 0 ? ` Lý do: ${uniqueErrors.join(" | ")}` : "";
       await log(
         "error",
-        `Chỉ tải được ${result.successCount}/${result.total} file PNG — kiểm tra Downloads hoặc thử tải thủ công.`
+        `Chỉ tải được ${result.successCount}/${result.total} file PNG.${detail}`
       );
     }
   }
@@ -289,6 +301,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           await setState({ delayMinSeconds: msg.delayMinSeconds, delayMaxSeconds: msg.delayMaxSeconds })
         );
         break;
+      case "SET_CONTINUOUS_MODE":
+        sendResponse(await setState({ continuousMode: !!msg.continuousMode }));
+        break;
+      case "SET_DEFAULT_SETTINGS": {
+        const state = await getState();
+        const merged = { ...(state.defaultSettings || {}), ...msg.patch };
+        sendResponse(await setState({ defaultSettings: merged }));
+        break;
+      }
       case "SET_AUTO_DOWNLOAD":
         sendResponse(await setState({ autoDownload: !!msg.autoDownload }));
         break;

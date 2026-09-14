@@ -19,6 +19,8 @@ const attachTabBtn = document.getElementById("attachTab");
 const attachedInfo = document.getElementById("attachedInfo");
 const delayMinEl = document.getElementById("delayMin");
 const delayMaxEl = document.getElementById("delayMax");
+const continuousModeEl = document.getElementById("continuousMode");
+const continuousHintEl = document.getElementById("continuousHint");
 const pasteArea = document.getElementById("pasteArea");
 const addFromPasteBtn = document.getElementById("addFromPaste");
 const importTextFile = document.getElementById("importTextFile");
@@ -49,6 +51,16 @@ const xlsxPreviewHint = document.getElementById("xlsxPreviewHint");
 const xlsxCancelBtn = document.getElementById("xlsxCancelBtn");
 const xlsxImportBtn = document.getElementById("xlsxImportBtn");
 const xlsxImportCountEl = document.getElementById("xlsxImportCount");
+const cfgAspectRatioEl = document.getElementById("cfgAspectRatio");
+const cfgModelVersionEl = document.getElementById("cfgModelVersion");
+const cfgModelRawEl = document.getElementById("cfgModelRaw");
+const cfgStylizationEl = document.getElementById("cfgStylization");
+const cfgWeirdnessEl = document.getElementById("cfgWeirdness");
+const cfgVarietyEl = document.getElementById("cfgVariety");
+const cfgSpeedEl = document.getElementById("cfgSpeed");
+const cfgStealthEl = document.getElementById("cfgStealth");
+const cfgVideoResolutionEl = document.getElementById("cfgVideoResolution");
+const cfgVideoBatchSizeEl = document.getElementById("cfgVideoBatchSize");
 
 function sendMsg(msg) {
   return new Promise((resolve) => chrome.runtime.sendMessage(msg, resolve));
@@ -76,6 +88,24 @@ function renderState(state) {
   delayMaxEl.value = state.delayMaxSeconds;
   autoDownloadEl.checked = !!state.autoDownload;
   downloadSubfolderEl.value = state.downloadSubfolder || "";
+  continuousModeEl.checked = !!state.continuousMode;
+  delayMinEl.disabled = !!state.continuousMode;
+  delayMaxEl.disabled = !!state.continuousMode;
+  if (continuousHintEl) {
+    continuousHintEl.style.display = state.continuousMode ? "block" : "none";
+  }
+
+  const cfg = state.defaultSettings || {};
+  cfgAspectRatioEl.value = cfg.aspectRatio || "";
+  cfgModelVersionEl.value = cfg.modelVersion || "";
+  cfgModelRawEl.value = cfg.modelRaw || "";
+  cfgStylizationEl.value = cfg.stylization ?? "";
+  cfgWeirdnessEl.value = cfg.weirdness ?? "";
+  cfgVarietyEl.value = cfg.variety ?? "";
+  cfgSpeedEl.value = cfg.speed || "";
+  cfgStealthEl.value = cfg.stealth || "";
+  cfgVideoResolutionEl.value = cfg.videoResolution || "";
+  cfgVideoBatchSizeEl.value = cfg.videoBatchSize ? String(cfg.videoBatchSize) : "";
 
   attachedInfo.textContent = state.tabId
     ? `Đã gắn tab ID: ${state.tabId}`
@@ -172,6 +202,49 @@ delayMaxEl.addEventListener("change", pushDelayRange);
 
 autoDownloadEl.addEventListener("change", async () => {
   renderState(await sendMsg({ type: "SET_AUTO_DOWNLOAD", autoDownload: autoDownloadEl.checked }));
+});
+
+continuousModeEl.addEventListener("change", async () => {
+  renderState(await sendMsg({ type: "SET_CONTINUOUS_MODE", continuousMode: continuousModeEl.checked }));
+});
+
+function setDefaultSetting(field, value) {
+  return sendMsg({ type: "SET_DEFAULT_SETTINGS", patch: { [field]: value } });
+}
+
+cfgAspectRatioEl.addEventListener("change", async () => {
+  renderState(await setDefaultSetting("aspectRatio", cfgAspectRatioEl.value || null));
+});
+cfgModelVersionEl.addEventListener("change", async () => {
+  renderState(await setDefaultSetting("modelVersion", cfgModelVersionEl.value || null));
+});
+cfgModelRawEl.addEventListener("change", async () => {
+  renderState(await setDefaultSetting("modelRaw", cfgModelRawEl.value || null));
+});
+cfgStylizationEl.addEventListener("change", async () => {
+  const v = cfgStylizationEl.value === "" ? null : Math.max(0, Math.min(1000, Number(cfgStylizationEl.value)));
+  renderState(await setDefaultSetting("stylization", v));
+});
+cfgWeirdnessEl.addEventListener("change", async () => {
+  const v = cfgWeirdnessEl.value === "" ? null : Math.max(0, Math.min(3000, Number(cfgWeirdnessEl.value)));
+  renderState(await setDefaultSetting("weirdness", v));
+});
+cfgVarietyEl.addEventListener("change", async () => {
+  const v = cfgVarietyEl.value === "" ? null : Math.max(0, Math.min(100, Number(cfgVarietyEl.value)));
+  renderState(await setDefaultSetting("variety", v));
+});
+cfgSpeedEl.addEventListener("change", async () => {
+  renderState(await setDefaultSetting("speed", cfgSpeedEl.value || null));
+});
+cfgStealthEl.addEventListener("change", async () => {
+  renderState(await setDefaultSetting("stealth", cfgStealthEl.value || null));
+});
+cfgVideoResolutionEl.addEventListener("change", async () => {
+  renderState(await setDefaultSetting("videoResolution", cfgVideoResolutionEl.value || null));
+});
+cfgVideoBatchSizeEl.addEventListener("change", async () => {
+  const v = cfgVideoBatchSizeEl.value === "" ? null : Number(cfgVideoBatchSizeEl.value);
+  renderState(await setDefaultSetting("videoBatchSize", v));
 });
 
 downloadSubfolderEl.addEventListener("change", async () => {

@@ -160,6 +160,12 @@ input[type="number"] {
   font-family: inherit;
 }
 
+input[type="text"]:disabled,
+input[type="number"]:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 input[type="text"] {
   width: 100%;
 }
@@ -328,6 +334,16 @@ button.ghost.danger {
 .toggle-label {
   font-size: 12px;
   font-weight: 500;
+}
+
+.continuous-row {
+  margin-top: 8px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--border);
+}
+
+.continuous-hint {
+  color: #d9a741;
 }
 
 .switch {
@@ -593,4 +609,26 @@ button.small {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 4px;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 10px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.settings-field-label {
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.settings-field select,
+.settings-field input {
+  width: 100%;
 }

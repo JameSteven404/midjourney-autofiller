@@ -64,13 +64,100 @@
       </div>
 
       <div class="card">
+        <div class="card-header"><label>Cấu hình mặc định Midjourney (áp trước khi gửi)</label></div>
+        <div class="settings-grid">
+          <div class="settings-field">
+            <span class="settings-field-label">Tỷ lệ khung hình</span>
+            <select id="cfgAspectRatio">
+              <option value="">Không đổi</option>
+              <option value="portrait">Portrait</option>
+              <option value="square">Square</option>
+              <option value="landscape">Landscape</option>
+            </select>
+          </div>
+          <div class="settings-field">
+            <span class="settings-field-label">Model Version</span>
+            <select id="cfgModelVersion">
+              <option value="">Không đổi</option>
+              <option value="standard">Standard</option>
+              <option value="hd">HD</option>
+            </select>
+          </div>
+          <div class="settings-field">
+            <span class="settings-field-label">Raw Mode</span>
+            <select id="cfgModelRaw">
+              <option value="">Không đổi</option>
+              <option value="standard">Standard</option>
+              <option value="raw">Raw</option>
+            </select>
+          </div>
+          <div class="settings-field">
+            <span class="settings-field-label">Stylization (0-1000)</span>
+            <input type="number" id="cfgStylization" min="0" max="1000" placeholder="Không đổi" />
+          </div>
+          <div class="settings-field">
+            <span class="settings-field-label">Weirdness (0-3000)</span>
+            <input type="number" id="cfgWeirdness" min="0" max="3000" placeholder="Không đổi" />
+          </div>
+          <div class="settings-field">
+            <span class="settings-field-label">Variety (0-100)</span>
+            <input type="number" id="cfgVariety" min="0" max="100" placeholder="Không đổi" />
+          </div>
+          <div class="settings-field">
+            <span class="settings-field-label">Speed</span>
+            <select id="cfgSpeed">
+              <option value="">Không đổi</option>
+              <option value="relax">Relax</option>
+              <option value="fast">Fast</option>
+            </select>
+          </div>
+          <div class="settings-field">
+            <span class="settings-field-label">Stealth</span>
+            <select id="cfgStealth">
+              <option value="">Không đổi</option>
+              <option value="on">On</option>
+              <option value="off">Off</option>
+            </select>
+          </div>
+          <div class="settings-field">
+            <span class="settings-field-label">Video Resolution</span>
+            <select id="cfgVideoResolution">
+              <option value="">Không đổi</option>
+              <option value="sd">SD</option>
+              <option value="hd">HD</option>
+            </select>
+          </div>
+          <div class="settings-field">
+            <span class="settings-field-label">Video Batch Size</span>
+            <select id="cfgVideoBatchSize">
+              <option value="">Không đổi</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="4">4</option>
+            </select>
+          </div>
+        </div>
+        <p class="hint">Chỉ áp dụng mục bạn chọn (khác "Không đổi"), còn lại giữ nguyên cài đặt hiện có trên Midjourney. Áp dụng 1 lần trước prompt đầu tiên của batch, không mở lại bảng cài đặt nếu không đổi gì thêm.</p>
+      </div>
+
+      <div class="card">
         <div class="card-header"><label>Thời gian chờ ngẫu nhiên giữa các prompt (giây)</label></div>
         <div class="range-row">
           <input type="number" id="delayMin" min="1" max="600" value="5" />
           <span class="range-sep">→</span>
           <input type="number" id="delayMax" min="1" max="600" value="15" />
         </div>
+        <div class="toggle-row continuous-row">
+          <label class="switch">
+            <input type="checkbox" id="continuousMode" />
+            <span class="slider"></span>
+          </label>
+          <label for="continuousMode" class="toggle-label">Chế độ làm liên tục (không chờ giữa prompt)</label>
+        </div>
         <p class="hint">Random hoá thời gian chờ giúp nhịp gửi prompt tự nhiên hơn, giảm rủi ro bị giới hạn tốc độ.</p>
+        <p class="hint continuous-hint" id="continuousHint">
+          Bật “làm liên tục” để gửi sát nhau tối đa; thường cần tắt nếu hay gặp lỗi giới hạn tốc độ.
+        </p>
       </div>
 
       <div class="card">
