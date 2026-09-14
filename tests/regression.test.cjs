@@ -11,7 +11,7 @@ const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn);
 function content() {
   const messages = [];
   const context = vm.createContext({ console, URL, structuredClone, setTimeout, clearTimeout,
-    setInterval: () => 1, clearInterval() {}, document: {},
+    setInterval: () => 1, clearInterval() {}, document: { querySelectorAll: () => [] },
     chrome: { runtime: { onMessage: event(), sendMessage(message, cb) {
       messages.push(message); cb?.([]); return Promise.resolve({ ok: true });
     } } } });
@@ -20,15 +20,17 @@ function content() {
 }
 
 async function background(initial = {}) {
-  let stored = { items: [], logs: [], downloads: {}, ...initial };
+  let stored = { items: [], logs: [], downloads: {}, inputMode: 'dom', ...initial };
   const messages = [], calls = [], files = new Map();
   const chrome = {
     sidePanel: { setPanelBehavior: async () => {} },
     storage: { local: { get: async () => ({ paf_state: structuredClone(stored) }),
       set: async data => { stored = structuredClone(data.paf_state); } } },
     runtime: { onMessage: event(), sendMessage: async message => { messages.push(message); } },
-    tabs: { sendMessage(id, message, cb) { calls.push(message); cb({ ok: true, submitted: true }); },
+    tabs: { onUpdated: event(), sendMessage(id, message, cb) { calls.push(message); cb({ ok: true, submitted: true }); },
+      get: async id => ({ id, url: 'https://www.midjourney.com/imagine' }),
       query: async () => [{ id: 7, url: 'https://www.midjourney.com/imagine' }] },
+    debugger: { onDetach: event(), attach: async () => {}, detach: async () => {}, sendCommand: async () => ({ result: { value: true } }) },
     scripting: { executeScript: async () => {} },
     downloads: { onChanged: event(), async download(options) {
       const id = files.size + 1;
@@ -36,6 +38,7 @@ async function background(initial = {}) {
     }, search: async ({ id }) => files.has(id) ? [files.get(id)] : [] }
   };
   const context = vm.createContext({ console, URL, structuredClone, setTimeout, clearTimeout, chrome });
+  context.importScripts = file => vm.runInContext(source(file), context);
   vm.runInContext(source('background.js'), context);
   await vm.runInContext('typeof startupReady === "undefined" ? Promise.resolve() : startupReady', context);
   return { context, chrome, files, messages, calls, state: () => stored,
@@ -252,4 +255,102 @@ test('interrupted registration is reconciled with actual Chrome download history
   await b.context.reconcileDownloadIntent('intent', record);
   assert.equal(b.state().downloads.intent, undefined);
   assert.equal(b.state().downloads[12].status, 'complete');
+});
+
+test('watcher scans the DOM once for 100 pending jobs', () => {
+  const { context: c } = content();
+  let scans = 0;
+  c.getAllMediaGrids = () => { scans++; return []; };
+  c.findErrorBanner = () => null;
+  vm.runInContext('for(let i=0;i<100;i++)pendingJobs.set(String(i),{text:"prompt "+i,startedAt:Date.now()});checkPendingJobs()', c);
+  assert.equal(scans, 1);
+});
+
+test('debugger connects once per queue and detaches after the final submit', async () => {
+  const b = await background({ tabId: 7, inputMode: 'debugger', continuousMode: true,
+    items: [{ id: 'one', text: 'first', status: 'pending' }] });
+  let attached = 0, detached = 0;
+  b.chrome.debugger.attach = async () => { attached++; };
+  b.chrome.debugger.detach = async () => { detached++; };
+  await b.context.runQueue();
+  assert.equal(attached, 1);
+  assert.equal(detached, 1);
+  assert.equal(b.calls[0].inputMode, 'debugger');
+});
+
+test('debugger attach failure does not attempt input or submit', async () => {
+  const b = await background({ tabId: 7, inputMode: 'debugger', items: [{ id: 'one', text: 'first', status: 'pending' }] });
+  b.chrome.debugger.attach = async () => { throw new Error('Another debugger is already attached'); };
+  await b.context.runQueue();
+  assert.equal(b.calls.length, 0);
+  assert.equal(b.state().items[0].status, 'pending');
+  assert.equal(b.state().paused, true);
+});
+
+test('user cancel while waiting for a slot stops without reattaching', async () => {
+  const b = await background({ tabId: 7, inputMode: 'debugger', continuousMode: true,
+    items: [{ id: 'one', text: 'first', status: 'generating' }, { id: 'two', text: 'second', status: 'pending' }] });
+  let attaches = 0;
+  b.chrome.debugger.attach = async () => { attaches++; };
+  const run = b.context.runQueue();
+  await until(() => b.state().debuggerStatus === 'attached');
+  b.chrome.debugger.onDetach.listeners[0]({ tabId: 7 }, 'canceled_by_user');
+  await run;
+  assert.equal(b.state().paused, true);
+  assert.equal(b.calls.length, 0);
+  assert.equal(attaches, 1);
+});
+
+test('debug input only accepts the current request in the selected main frame', async () => {
+  const b = await background({ tabId: 7, inputMode: 'debugger' });
+  await b.context.setState({ running: true, items: [{ id: 'one', text: 'actual prompt', status: 'running', tabId: 7 }] });
+  const response = await b.message({ type: 'MJ_DEBUG_INPUT', action: 'insertText', requestId: 'one', marker: 'one:1' }, { tab: { id: 8 }, frameId: 0 });
+  assert.equal(response.ok, false);
+  assert.match(response.error, /không thuộc/);
+});
+
+test('debug submit is persisted before clicking and cannot run twice', async () => {
+  const b = await background({ tabId: 7, inputMode: 'debugger' });
+  await b.context.setState({ running: true, items: [{ id: 'one', text: 'actual prompt', status: 'running', tabId: 7, debugTextInserted: true }] });
+  const transport = vm.runInContext('debugInput', b.context);
+  let clicks = 0;
+  transport.click = async () => {
+    assert.equal(b.state().items[0].debugSubmitAttempted, true);
+    clicks++;
+  };
+  const msg = { type: 'MJ_DEBUG_INPUT', action: 'submit', requestId: 'one', marker: 'one:2' };
+  const sender = { tab: { id: 7 }, frameId: 0 };
+  assert.equal((await b.message(msg, sender)).ok, true);
+  assert.equal((await b.message(msg, sender)).ok, false);
+  assert.equal(clicks, 1);
+});
+
+test('stop during slow debugger attach prevents all input commands', async () => {
+  const b = await background({ tabId: 7, inputMode: 'debugger', items: [{ id: 'one', text: 'first', status: 'pending' }] });
+  let finish, detachCount = 0;
+  b.chrome.debugger.attach = () => new Promise(resolve => { finish = resolve; });
+  b.chrome.debugger.detach = async () => { detachCount++; };
+  const run = b.context.runQueue();
+  await until(() => finish);
+  await b.message({ type: 'STOP' });
+  finish();
+  await run;
+  assert.equal(b.calls.length, 0);
+  assert.equal(detachCount, 1);
+  assert.equal(b.state().items[0].status, 'pending');
+});
+
+test('composer is reselected after settings rerender the input', async () => {
+  const { context: c } = content();
+  const old = { focus() { throw new Error('stale input'); } }, fresh = { focus() {} };
+  let reads = 0, filled;
+  c.findPromptTextarea = () => ++reads === 1 ? old : fresh;
+  c.findErrorBanner = () => null;
+  c.ensureDefaultSettings = async () => ({ ok: true });
+  c.setNativeValue = el => { filled = el; };
+  c.sleep = async () => {};
+  c.findSubmitButton = () => ({ click() {} });
+  c.waitForPromptToClear = async () => true;
+  assert.equal((await c.fillAndSubmit('test', 'one', {})).ok, true);
+  assert.equal(filled, fresh);
 });

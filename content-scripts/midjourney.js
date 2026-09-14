@@ -1,8 +1,7 @@
 // Content script cho Midjourney web app (midjourney.com/imagine).
-// Ô nhập là <textarea id="desktop_input_bar"> điều khiển bởi React, nên phải
-// set value qua native setter rồi dispatch 'input' để React nhận thay đổi.
+// Debug/CDP performs trusted input; DOM mode retains the native value setter.
 
-const SUBMIT_CLEAR_TIMEOUT_MS = 1800;
+const SUBMIT_CLEAR_TIMEOUT_MS = 5000;
 const SUBMIT_CLEAR_POLL_MS = 120;
 const WATCHER_INTERVAL_MS = 4000;
 const JOB_TIMEOUT_MS = 30 * 60 * 1000;
@@ -11,6 +10,52 @@ const SEND_ICON_PATH_PREFIX = "M3.82715 4.39551";
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+async function waitUntil(predicate, timeoutMs, intervalMs = 50) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (predicate()) return true;
+    await sleep(intervalMs);
+  } while (Date.now() < deadline);
+  return false;
+}
+
+let submissionContext = null;
+let targetSequence = 0;
+async function debugAction(action, element, ratio) {
+  const request = submissionContext;
+  if (!request) throw new Error("Không có prompt đang điều khiển.");
+  const marker = request.requestId + ":" + (++targetSequence);
+  const attr = action === "insertText" ? "data-mj-input-target" : "data-mj-click-target";
+  if (element) {
+    element.scrollIntoView({ block: "nearest", inline: "nearest" });
+    element.setAttribute(attr, marker);
+  }
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "MJ_DEBUG_INPUT", action,
+      requestId: request.requestId, marker, ratio });
+    if (!response?.ok) throw new Error(response?.error || "Không nhận được xác nhận debug.");
+  } finally {
+    if (element?.getAttribute(attr) === marker) element.removeAttribute(attr);
+  }
+}
+
+async function clickElement(element, ratio, action = "click") {
+  if (submissionContext?.inputMode === "debugger") await debugAction(action, element, ratio);
+  else element.click();
+}
+
+async function fillAndSubmit(text, requestId, settingsConfig, inputMode = "dom") {
+  if (submissionContext) return { ok: false, notSubmitted: true, note: "Đang xử lý prompt khác." };
+  submissionContext = { requestId, inputMode, submitAttempted: false };
+  try {
+    return await performFillAndSubmit(text, requestId, settingsConfig);
+  } catch (error) {
+    return { ok: false, notSubmitted: !submissionContext.submitAttempted, note: String(error.message || error) };
+  } finally {
+    submissionContext = null;
+  }
 }
 
 function isElementVisible(el) {
@@ -111,17 +156,15 @@ function gridKey(grid) {
   return href || getGridImageUrls(grid).slice().sort().join("|");
 }
 
-function findGridForText(text, job = {}) {
+function findGridForText(text, job = {}, snapshots) {
   const target = normalizePromptText(text);
   if (!target) return null;
-  const grids = getAllMediaGrids();
+  const grids = snapshots || getAllMediaGrids().map(grid => ({ grid, key: gridKey(grid), text: getPromptTextForGrid(grid) }));
   if (grids.length === 0) return null;
 
   const ranked = [];
-  for (const g of grids) {
-    const key = gridKey(g);
+  for (const { grid: g, key, text: candidate } of grids) {
     if (!key || claimedGridKeys.has(key) || job.excludedKeys?.includes(key)) continue;
-    const candidate = getPromptTextForGrid(g);
     // Similar prefixes are not enough evidence to download this job's images.
     const score = candidate === target ? 1000 : 0;
     if (score > 0) ranked.push({ grid: g, score });
@@ -236,11 +279,17 @@ async function waitForPromptToClear(textarea) {
 // (MJ_JOB_RESULT) khớp theo requestId thay vì chặn message ban đầu.
 const pendingJobs = new Map(); // requestId -> { text, startedAt }
 let watcherTimer = null;
+let watcherObserver = null;
+let watcherDebounce = null;
 
 function stopWatcherIfIdle() {
   if (pendingJobs.size === 0 && watcherTimer) {
     clearInterval(watcherTimer);
     watcherTimer = null;
+    watcherObserver?.disconnect();
+    watcherObserver = null;
+    clearTimeout(watcherDebounce);
+    watcherDebounce = null;
   }
 }
 
@@ -262,12 +311,13 @@ async function reportJobDone(requestId, grid) {
 function checkPendingJobs() {
   const errNow = findErrorBanner();
   const now = Date.now();
+  const snapshots = getAllMediaGrids().map(grid => ({ grid, key: gridKey(grid), text: getPromptTextForGrid(grid) }));
 
   if (errNow) chrome.runtime.sendMessage({ type: "MJ_PAGE_BLOCKED", note: errNow }).catch(() => {});
 
   for (const [requestId, job] of Array.from(pendingJobs.entries())) {
     if (job.reporting) continue;
-    const grid = findGridForText(job.text, job);
+    const grid = findGridForText(job.text, job, snapshots);
     if (grid && gridIsFullyLoaded(grid)) {
       const key = gridKey(grid);
       claimedGridKeys.add(key);
@@ -300,6 +350,14 @@ function checkPendingJobs() {
 function ensureWatcher() {
   if (watcherTimer) return;
   watcherTimer = setInterval(checkPendingJobs, WATCHER_INTERVAL_MS);
+  if (typeof MutationObserver !== "undefined" && document.body) {
+    watcherObserver = new MutationObserver(() => {
+      if (watcherDebounce) return;
+      watcherDebounce = setTimeout(() => { watcherDebounce = null; checkPendingJobs(); }, 200);
+    });
+    watcherObserver.observe(document.body, { childList: true, subtree: true, attributes: true,
+      attributeFilter: ["src", "srcset", "class", "aria-busy"] });
+  }
 }
 
 // Nếu extension bị reload (chrome://extensions) trong lúc 1 job đang ở trạng
@@ -376,21 +434,21 @@ function findRowFor(labelText) {
   return null;
 }
 
-function clickOptionInGroup(labelText, optionText) {
+async function clickOptionInGroup(labelText, optionText) {
   const row = findRowFor(labelText);
   if (!row) return { ok: false, note: `Không tìm thấy nhóm "${labelText}".` };
   const btn = Array.from(row.querySelectorAll("button")).find(
     (b) => (b.innerText || "").trim().toLowerCase() === String(optionText).toLowerCase()
   );
   if (!btn) return { ok: false, note: `Không tìm thấy tuỳ chọn "${optionText}" trong "${labelText}".` };
-  if (!isOptionSelected(btn)) btn.click();
+  if (!isOptionSelected(btn)) await clickElement(btn);
   return { ok: true };
 }
 
-function clickPresetButton(text) {
+async function clickPresetButton(text) {
   const btn = Array.from(document.querySelectorAll("button")).find((b) => (b.innerText || "").trim() === text);
   if (!btn) return { ok: false, note: `Không tìm thấy nút "${text}".` };
-  if (!isOptionSelected(btn)) btn.click();
+  if (!isOptionSelected(btn)) await clickElement(btn);
   return { ok: true };
 }
 
@@ -416,7 +474,7 @@ function findSliderInfo(labelText) {
   return { valueDiv, track };
 }
 
-function setSliderValue(labelText, targetValue, maxValue) {
+async function setSliderValue(labelText, targetValue, maxValue) {
   const info = findSliderInfo(labelText);
   if (!info) return { ok: false, note: `Không tìm thấy thanh trượt "${labelText}".` };
 
@@ -426,6 +484,10 @@ function setSliderValue(labelText, targetValue, maxValue) {
   const rect = info.track.getBoundingClientRect();
   const clamped = Math.max(0, Math.min(maxValue, targetValue));
   const ratio = maxValue > 0 ? clamped / maxValue : 0;
+  if (submissionContext?.inputMode === "debugger") {
+    await clickElement(info.track, ratio);
+    return { ok: true };
+  }
   const x = rect.x + Math.max(2, Math.min(rect.width - 2, ratio * rect.width));
   const y = rect.y + rect.height / 2;
   const opts = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 1, isPrimary: true };
@@ -457,10 +519,7 @@ function getSliderValueNow(labelText) {
   return Number((info.valueDiv.innerText || "0").trim());
 }
 
-// Đọc lại toàn bộ giá trị SAU KHI đã set hết — bấm liên tiếp quá nhanh đôi
-// khi âm thầm không có tác dụng do layout dịch chuyển đúng lúc dispatch sự
-// kiện (đã kiểm chứng thực tế). Thử lại 1 lần cho mục nào chưa đúng, lúc này
-// layout đã ổn định nên lần thử lại đáng tin cậy hơn nhiều.
+// Read each value back; retry only settings that have not reached their target.
 async function verifyAndRetrySettings(config, notes) {
   const ASPECT_LABELS = { portrait: "Portrait", square: "Square", landscape: "Landscape" };
   const checks = [];
@@ -510,12 +569,11 @@ async function verifyAndRetrySettings(config, notes) {
 
   const MAX_RETRIES = 3;
   for (const check of checks) {
-    const matches = (val) => (typeof check.expected === "number" ? Number(val) === check.expected : val === check.expected);
+    const matches = (val) => val != null && (typeof check.expected === "number" ? Number(val) === check.expected : val === check.expected);
     let ok = matches(check.current());
     for (let attempt = 0; !ok && attempt < MAX_RETRIES; attempt++) {
-      check.retry();
-      await sleep(350);
-      ok = matches(check.current());
+      await check.retry();
+      ok = await waitUntil(() => matches(check.current()), 900, 50);
     }
     if (!ok) {
       notes.push(`"${check.name}" chưa đúng sau ${MAX_RETRIES} lần thử lại (mong muốn ${check.expected}, hiện tại ${check.current()}).`);
@@ -533,120 +591,50 @@ function hasAnyConfiguredSetting(config) {
 }
 
 async function ensureDefaultSettings(config) {
-  // Không có mục nào được cấu hình ("Không đổi" hết) — không cần mở bảng cài
-  // đặt Midjourney làm gì cả. Trước đây thiếu điều kiện này khiến bảng bị mở
-  // ra vô ích ở MỌI lần chạy dù người dùng chưa chỉnh gì, gây khó chịu vì nó
-  // không tự đóng lại được (xem ghi chú bên dưới).
   if (!hasAnyConfiguredSetting(config)) return { ok: true };
-
-  const key = JSON.stringify(config);
+  const key = JSON.stringify([submissionContext?.inputMode, config]);
   if (lastAppliedSettingsKey === key) return { ok: true };
-
   const trigger = findSettingsTrigger();
-  if (!trigger) return { ok: false, note: "Không tìm thấy nút mở bảng cài đặt Midjourney." };
-  trigger.click();
-  await sleep(400);
-
+  if (!trigger) return { ok: false, note: "Không tìm thấy nút cài đặt Midjourney." };
+  await clickElement(trigger);
+  await waitUntil(() => getSelectedPreset(["Portrait", "Square", "Landscape"]) != null, 1200, 50);
   const notes = [];
-  const ASPECT_LABELS = { portrait: "Portrait", square: "Square", landscape: "Landscape" };
-
-  // Quan trọng: chờ đủ lâu SAU MỖI thao tác trước khi làm bước kế tiếp. Đã
-  // kiểm chứng thực tế: bấm liên tiếp quá nhanh (đặc biệt sau khi đổi Aspect
-  // Ratio, làm đổi kích thước khung xem trước phía trên) khiến layout của
-  // các control bên dưới (vd. thanh trượt Aesthetics) dịch chuyển NGAY GIỮA
-  // lúc lấy toạ độ và lúc dispatch sự kiện, dẫn đến set sai giá trị hoặc set
-  // nhầm control khác — không phải lỗi logic mà là race condition với
-  // animation/re-render của React.
-  const STEP_DELAY_MS = 350;
-
-  if (config.aspectRatio && ASPECT_LABELS[config.aspectRatio]) {
-    const r = clickPresetButton(ASPECT_LABELS[config.aspectRatio]);
-    if (!r.ok) notes.push(r.note);
-    await sleep(STEP_DELAY_MS);
-  }
-  if (config.modelVersion) {
-    const r = clickOptionInGroup("Version", config.modelVersion === "hd" ? "HD" : "Standard");
-    if (!r.ok) notes.push(r.note);
-    await sleep(STEP_DELAY_MS);
-  }
-  if (config.modelRaw) {
-    const r = clickOptionInGroup("Raw", config.modelRaw === "raw" ? "Raw" : "Standard");
-    if (!r.ok) notes.push(r.note);
-    await sleep(STEP_DELAY_MS);
-  }
-  if (config.stylization != null) {
-    const r = setSliderValue("Stylization", config.stylization, 1000);
-    if (!r.ok) notes.push(r.note);
-    await sleep(STEP_DELAY_MS);
-  }
-  if (config.weirdness != null) {
-    const r = setSliderValue("Weirdness", config.weirdness, 3000);
-    if (!r.ok) notes.push(r.note);
-    await sleep(STEP_DELAY_MS);
-  }
-  if (config.variety != null) {
-    const r = setSliderValue("Variety", config.variety, 100);
-    if (!r.ok) notes.push(r.note);
-    await sleep(STEP_DELAY_MS);
-  }
-  if (config.speed) {
-    const r = clickOptionInGroup("Speed", config.speed === "fast" ? "Fast" : "Relax");
-    if (!r.ok) notes.push(r.note);
-    await sleep(STEP_DELAY_MS);
-  }
-  if (config.stealth) {
-    const r = clickOptionInGroup("Stealth", config.stealth === "on" ? "On" : "Off");
-    if (!r.ok) notes.push(r.note);
-    await sleep(STEP_DELAY_MS);
-  }
-  if (config.videoResolution) {
-    const r = clickOptionInGroup("Video Resolution", config.videoResolution === "hd" ? "HD" : "SD");
-    if (!r.ok) notes.push(r.note);
-    await sleep(STEP_DELAY_MS);
-  }
-  if (config.videoBatchSize) {
-    const r = clickOptionInGroup("Video Batch Size", String(config.videoBatchSize));
-    if (!r.ok) notes.push(r.note);
-    await sleep(STEP_DELAY_MS);
-  }
-
-  // Xác minh lại toàn bộ giá trị sau khi áp — vì thao tác click nhanh có thể
-  // âm thầm không có tác dụng (không báo lỗi) nếu layout dịch chuyển đúng
-  // lúc đó; kiểm tra lại 1 lần và thử lại tối đa 1 lần cho các mục sai khác.
   await verifyAndRetrySettings(config, notes);
-
-  // Không tự đóng lại bảng cài đặt bằng JS được: đã kiểm chứng thực tế rằng
-  // bấm lại nút trigger, phím Escape, và "click ra ngoài" mô phỏng bằng
-  // dispatchEvent đều KHÔNG đóng được — bảng này chỉ phản hồi thao tác chuột/
-  // phím thật của người dùng (sự kiện do content script tạo ra luôn có
-  // isTrusted=false, bị component lọc bỏ). Đây là giới hạn của trình duyệt,
-  // không có cách khắc phục an toàn từ content script thông thường. Bù lại,
-  // bảng chỉ mở đúng 1 lần cho cả batch khi có cấu hình mặc định thực sự
-  // được set (xem hasAnyConfiguredSetting ở trên và cache lastAppliedSettingsKey
-  // bên dưới) — không mở lại cho mỗi prompt, và hoàn toàn không mở nếu không
-  // cấu hình gì cả.
+  if (submissionContext?.inputMode === "debugger") await debugAction("escape");
+  if (notes.length) return { ok: false, note: notes.join("; ") };
   lastAppliedSettingsKey = key;
-  return notes.length > 0 ? { ok: false, note: notes.join("; ") } : { ok: true };
+  return { ok: true };
 }
 
-async function fillAndSubmit(text, requestId, settingsConfig) {
+async function performFillAndSubmit(text, requestId, settingsConfig) {
   const beforeError = findErrorBanner();
   if (beforeError) return { ok: false, rateLimited: true, notSubmitted: true, note: beforeError };
-  const textarea = findPromptTextarea();
+  let textarea = findPromptTextarea();
   if (!textarea) {
     return { ok: false, notSubmitted: true, note: "Không tìm thấy ô nhập prompt (#desktop_input_bar). Giao diện Midjourney có thể đã đổi." };
   }
 
-  // Không chặn việc gửi prompt nếu áp cấu hình mặc định thất bại — vẫn gửi
-  // với cấu hình đang có sẵn, chỉ ghi chú lại để người dùng biết.
   const settingsResult = await ensureDefaultSettings(settingsConfig);
-  const settingsNote = settingsResult.ok ? "" : ` (Lưu ý cấu hình: ${settingsResult.note})`;
+  if (!settingsResult.ok) return { ok: false, notSubmitted: true, note: settingsResult.note };
+  textarea = findPromptTextarea();
+  if (!textarea) return { ok: false, notSubmitted: true, note: "Ô nhập đã thay đổi sau khi áp cài đặt. Chưa gửi prompt." };
 
   textarea.focus();
-  setNativeValue(textarea, text);
-  await sleep(200);
+  if (submissionContext.inputMode === "debugger") {
+    await debugAction("insertText", textarea);
+    // HTML textareas normalize Windows CRLF to LF; preserve every other character.
+    if (!await waitUntil(() => textarea.value === text.replace(/\r\n?/g, "\n"), 1200)) {
+      return { ok: false, notSubmitted: true, note: "Nội dung ô nhập chưa khớp prompt. Chưa gửi." };
+    }
+  } else {
+    setNativeValue(textarea, text);
+    await sleep(200);
+  }
 
-  const submitBtn = findSubmitButton(textarea);
+  let submitBtn = findSubmitButton(textarea);
+  if (!submitBtn && submissionContext.inputMode === "debugger") {
+    await waitUntil(() => { submitBtn = findSubmitButton(textarea); return !!submitBtn; }, 1500);
+  }
   const excludedKeys = getAllMediaGrids().map(gridKey).filter(Boolean);
   const startedAt = Date.now();
   if (submitBtn) {
@@ -656,10 +644,13 @@ async function fillAndSubmit(text, requestId, settingsConfig) {
         note: "Nút gửi đang bị vô hiệu hoá (prompt có thể rỗng hoặc đang chờ job trước).",
       };
     }
-    submitBtn.click();
+    submissionContext.submitAttempted = true;
+    await clickElement(submitBtn, undefined, "submit");
   } else {
+    if (submissionContext.inputMode === "debugger") return { ok: false, notSubmitted: true, note: "Chưa tìm thấy nút gửi sẵn sàng; đã giữ prompt trong ô nhập." };
     // Dự phòng nếu Midjourney đổi UI và icon gửi không còn khớp — thử Enter,
     // nhưng đã biết cách này không đáng tin cậy bằng click trực tiếp.
+    submissionContext.submitAttempted = true;
     await submitViaEnter(textarea);
   }
 
@@ -678,12 +669,12 @@ async function fillAndSubmit(text, requestId, settingsConfig) {
   pendingJobs.set(requestId, { text: normalizePromptText(text), startedAt, excludedKeys });
   ensureWatcher();
 
-  return { ok: true, submitted: true, excludedKeys, startedAt, note: "Đã gửi, đang chờ Midjourney tạo ảnh..." + settingsNote };
+  return { ok: true, submitted: true, excludedKeys, startedAt, note: "Đã gửi, đang chờ Midjourney tạo ảnh..." };
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "FILL_AND_SUBMIT_MJ") {
-    fillAndSubmit(msg.text, msg.requestId, msg.settingsConfig).then(sendResponse)
+    fillAndSubmit(msg.text, msg.requestId, msg.settingsConfig, msg.inputMode).then(sendResponse)
       .catch(err => sendResponse({ ok: false, note: String(err.message || err) }));
     return true;
   }

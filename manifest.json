@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "Midjourney Prompt Auto-Filler",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Tự động điền và gửi hàng loạt prompt cho Midjourney web.",
-  "permissions": ["storage", "activeTab", "tabs", "sidePanel", "downloads", "scripting"],
+  "permissions": ["storage", "activeTab", "tabs", "sidePanel", "downloads", "scripting", "debugger"],
   "host_permissions": [
     "https://www.midjourney.com/*",
     "https://midjourney.com/*",

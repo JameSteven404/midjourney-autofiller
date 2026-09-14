@@ -12,6 +12,7 @@
         <img class="brand-icon" src="../icons/portrait.png" alt="Icon tiện ích" width="32" height="32" />
         <h1>Midjourney Auto-Filler</h1>
       </div>
+      <p class="hint" id="debugStatus"></p>
       <p class="subtitle">Tự động điền &amp; gửi hàng loạt prompt cho Midjourney web.</p>
     </header>
 
@@ -55,10 +56,20 @@
         <p class="empty-hint" id="emptyHint">Chưa có prompt nào trong hàng đợi.</p>
         <p class="hint" id="queueProgress"></p>
         <p class="hint" id="queuePauseReason"></p>
+        <p class="hint" id="queueTiming"></p>
+        <button id="retryAllDownloads" class="ghost small">Tải ảnh còn thiếu của cả hàng đợi</button>
       </div>
     </section>
 
     <section class="tabpanel hidden" id="tab-settings">
+      <div class="card">
+        <div class="card-header"><label>Chế độ điều khiển</label></div>
+        <select id="inputMode">
+          <option value="debugger">Debug / CDP — nhập và click qua trình duyệt</option>
+          <option value="dom">DOM — chế độ cũ</option>
+        </select>
+        <p class="hint">Debug được kết nối khi bấm Chạy và ngắt khi dừng hoặc gửi hết hàng đợi. Bấm Hủy trên thanh thông báo của trình duyệt sẽ tạm dừng tool. Chỉ đổi chế độ khi hàng đợi đã dừng.</p>
+      </div>
       <div class="card">
         <div class="card-header"><label>Tab đích</label></div>
         <button id="attachTab" class="secondary full">Gắn tab đang mở</button>
@@ -182,6 +193,7 @@
         <div class="card-header">
           <label>Nhật ký gỡ lỗi</label>
           <button id="clearLogs" class="ghost small">Xoá log</button>
+          <button id="exportReport" class="ghost small">Xuất báo cáo</button>
         </div>
         <div id="logList" class="log-list"></div>
         <p class="empty-hint" id="emptyLogHint">Chưa có nhật ký nào.</p>

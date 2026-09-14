@@ -1,5 +1,6 @@
 // Quản lý hàng đợi prompt và điều phối giữa side panel <-> content script.
 // Bản dành riêng cho Midjourney web.
+importScripts("lib/debugger-input.js");
 
 const ACTION_TYPE = "FILL_AND_SUBMIT_MJ";
 const STORAGE_KEY = "paf_state";
@@ -11,6 +12,10 @@ const DEFAULT_STATE = {
   running: false,
   paused: false,
   continuousMode: false,
+  inputMode: "debugger",
+  debuggerStatus: "off",
+  debuggerTabId: null,
+  nextSubmitAt: null,
   maxInFlight: 1,
   pauseReason: "",
   downloads: {},
@@ -249,10 +254,70 @@ function flightLimit(state) {
 
 let queueTask = null;
 let queueEpoch = 0;
+let queueWake = null;
+function wakeQueue() { queueWake?.(); }
+function waitForQueue(ms) {
+  return new Promise(resolve => {
+    const done = () => { clearTimeout(timer); if (queueWake === done) queueWake = null; resolve(); };
+    const timer = setTimeout(done, ms);
+    queueWake = done;
+  });
+}
+
+const debugInput = new MidjourneyDebuggerInput(chrome, {
+  onStatus: (debuggerStatus, debuggerTabId) => setState({ debuggerStatus, debuggerTabId }),
+  onDetach: (reason, tabId) => {
+    const paused = pauseQueue("Debug đã ngắt (" + reason + "). Kiểm tra job rồi bấm Chạy khi muốn tiếp tục.");
+    if (reason === "target_closed") setState(state => ({ tabId: state.tabId === tabId ? null : state.tabId,
+      items: state.items.map(item => item.tabId === tabId && ["running", "generating"].includes(item.status)
+        ? { ...item, status: "review", note: "Tab đã đóng; kiểm tra kết quả trên Midjourney trước khi tiếp tục." } : item) })).catch(console.error);
+    paused.catch(console.error);
+  },
+});
+let debugCommands = Promise.resolve();
+
+function handleDebugInput(msg, sender) {
+  const operation = debugCommands.then(async () => {
+    const guard = async () => {
+      const state = await getState();
+      const item = state.items.find(it => it.id === msg.requestId);
+      if (state.inputMode !== "debugger" || !state.running || state.paused ||
+          sender.frameId !== 0 || sender.tab?.id !== state.tabId || item?.tabId !== state.tabId || item?.status !== "running") {
+        throw new Error("Lệnh debug không thuộc prompt/tab đang chạy.");
+      }
+      return item;
+    };
+    const item = await guard();
+    if (!["insertText", "click", "submit", "escape"].includes(msg.action)) throw new Error("Lệnh debug không hỗ trợ.");
+    if (msg.action !== "escape" && (typeof msg.marker !== "string" || !msg.marker.startsWith(item.id + ":") || msg.marker.length > 160)) {
+      throw new Error("Đích thao tác không hợp lệ.");
+    }
+    if (item.debugSubmitAttempted) throw new Error("Đã thử gửi prompt này; không tự gửi lần hai.");
+    if (msg.action === "insertText") {
+      if (item.debugTextInserted) throw new Error("Prompt đã được nhập trong lần gửi này.");
+      await debugInput.insertText(msg.marker, item.text, guard);
+      await updateItem(item.id, { debugTextInserted: true });
+    } else if (msg.action === "escape") {
+      await debugInput.escape(guard);
+    } else {
+      if (msg.action === "submit") {
+        if (!item.debugTextInserted) throw new Error("Chưa xác nhận nhập prompt.");
+        // Persist before the input event: a lost response must never cause a second click.
+        await updateItem(item.id, { debugSubmitAttempted: true });
+      }
+      await debugInput.click(msg.marker, msg.ratio, guard);
+    }
+    return { ok: true };
+  });
+  debugCommands = operation.catch(() => {});
+  return operation;
+}
 
 async function pauseQueue(reason) {
   queueEpoch++;
-  await setState({ running: false, paused: true, pauseReason: reason });
+  wakeQueue();
+  await setState({ running: false, paused: true, pauseReason: reason, nextSubmitAt: null });
+  await debugInput.detach();
   await log("error", reason);
 }
 
@@ -268,6 +333,7 @@ async function processQueue(epoch) {
     let state = await getState();
     if (!state.tabId) throw new Error("Chưa gắn tab Midjourney.");
     await setState({ running: true, paused: false, pauseReason: "" });
+    if (state.inputMode === "debugger") await debugInput.attach(state.tabId);
     await log("info", "Bắt đầu hàng đợi. Tối đa " + flightLimit(state) + " prompt đang tạo.");
     let reportedWait = false;
     while (epoch === queueEpoch) {
@@ -286,17 +352,18 @@ async function processQueue(epoch) {
       if (inFlightCount(state) >= flightLimit(state)) {
         if (!reportedWait) await log("info", "Đang chờ chỗ trống cho prompt tiếp theo.");
         reportedWait = true;
-        await sleep(1000);
+        await waitForQueue(1000);
         continue;
       }
       reportedWait = false;
       const item = state.items[idx];
-      await updateItem(item.id, { status: "running", tabId: state.tabId, startedAt: Date.now(), note: "" });
+      await updateItem(item.id, { status: "running", tabId: state.tabId, startedAt: Date.now(), note: "",
+        debugTextInserted: false, debugSubmitAttempted: false });
       await log("info", "Đang gửi: " + item.text.slice(0, 60));
       let result;
       try {
         result = await sendToTab(state.tabId, { type: ACTION_TYPE, text: item.text,
-          requestId: item.id, settingsConfig: state.defaultSettings });
+          requestId: item.id, settingsConfig: state.defaultSettings, inputMode: state.inputMode });
         if (!result) throw new Error("Không nhận được phản hồi từ trang; chưa rõ prompt đã được gửi hay chưa.");
       } catch (err) {
         await updateItem(item.id, { status: "review", note: String(err.message || err) });
@@ -307,7 +374,8 @@ async function processQueue(epoch) {
       await setState(current => ({ items: current.items.map(it => {
         if (it.id !== item.id || it.status !== "running") return it;
         return { ...it, status: result.ok ? "generating" : (result.notSubmitted ? "pending" : "review"),
-          note: result.note || "", excludedKeys: result.excludedKeys || [], startedAt: result.startedAt || it.startedAt };
+          note: result.note || "", excludedKeys: result.excludedKeys || [], startedAt: result.startedAt || it.startedAt,
+          submitDurationMs: Date.now() - it.startedAt };
       }) }));
       if (!result.ok || result.rateLimited) {
         await pauseQueue((result.rateLimited ? "Midjourney báo giới hạn/lỗi: " : "Chưa xác nhận gửi: ") + (result.note || "Kiểm tra trang."));
@@ -318,11 +386,15 @@ async function processQueue(epoch) {
       state = await getState();
       if (!state.continuousMode && findNextPendingIndex(state) !== -1) {
         const until = Date.now() + randomDelayMs(state.delayMinSeconds ?? 8, state.delayMaxSeconds ?? 20);
-        while (epoch === queueEpoch && Date.now() < until) await sleep(Math.min(500, until - Date.now()));
+        await setState({ nextSubmitAt: until });
+        while (epoch === queueEpoch && Date.now() < until) await waitForQueue(Math.min(1000, until - Date.now()));
+        await setState({ nextSubmitAt: null });
       }
     }
   } catch (err) {
     await pauseQueue(String(err.message || err));
+  } finally {
+    await debugInput.detach();
   }
 }
 
@@ -338,6 +410,7 @@ async function handleJobResult(msg, sender) {
       mediaUrls: msg.mediaUrls || [], gridKey: msg.gridKey || "", completedAt: Date.now() };
   }) }));
   if (!accepted) return;
+  wakeQueue();
   await log(msg.ok ? "success" : "error", msg.note || (msg.ok ? "Đã tạo xong ảnh." : "Chưa xác nhận được ảnh."));
   if (!msg.ok) await pauseQueue(msg.note || "Job cần kiểm tra thủ công trước khi gửi tiếp.");
   if (msg.ok && state.autoDownload && msg.mediaUrls?.length) {
@@ -347,7 +420,7 @@ async function handleJobResult(msg, sender) {
 
 // Worker restart does not prove that an interrupted submit failed.
 const startupReady = (async () => {
-  await setState(state => ({ running: false,
+  await setState(state => ({ running: false, debuggerStatus: "off", debuggerTabId: null, nextSubmitAt: null,
     paused: state.running ? true : state.paused,
     pauseReason: state.running ? "Tiện ích vừa khởi động lại. Kiểm tra job đang gửi rồi bấm Chạy để tiếp tục." : state.pauseReason,
     items: state.items.map(it => it.status === "running" ? { ...it, status: "review",
@@ -361,7 +434,20 @@ const startupReady = (async () => {
   }
 })().catch(console.error);
 
+chrome.tabs.onUpdated.addListener((tabId, changes) => {
+  if (!changes.url || /^https:\/\/(www\.)?midjourney\.com\//i.test(changes.url)) return;
+  startupReady.then(async () => {
+    const state = await getState();
+    if (state.running && state.tabId === tabId) await pauseQueue("Tab đã rời Midjourney; dừng gửi prompt.");
+  }).catch(console.error);
+});
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === "MJ_DEBUG_INPUT") {
+    startupReady.then(() => handleDebugInput(msg, sender)).then(sendResponse)
+      .catch(err => sendResponse({ ok: false, error: String(err.message || err) }));
+    return true;
+  }
   if (msg.type === "MJ_JOB_RESULT") {
     startupReady.then(() => handleJobResult(msg, sender)).then(() => sendResponse({ ok: true }))
       .catch(err => sendResponse({ ok: false, error: String(err.message || err) }));
@@ -405,11 +491,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         break;
       case "SET_MAX_IN_FLIGHT":
         sendResponse(await setState({ maxInFlight: flightLimit(msg) }));
+        wakeQueue();
         break;
+      case "SET_INPUT_MODE": {
+        if (queueTask) throw new Error("Dừng hàng đợi trước khi đổi chế độ điều khiển.");
+        await debugInput.detach();
+        sendResponse(await setState({ inputMode: msg.inputMode === "dom" ? "dom" : "debugger" }));
+        break;
+      }
       case "RETRY_DOWNLOAD": {
         const state = await getState();
         const item = state.items.find(it => it.id === msg.id);
         if (item?.mediaUrls?.length) await downloadMedia(item.mediaUrls, item.text, state.downloadSubfolder, item.id);
+        sendResponse(await getState());
+        break;
+      }
+      case "RETRY_ALL_DOWNLOADS": {
+        const state = await getState();
+        for (const item of state.items.filter(it => it.mediaUrls?.length)) {
+          await downloadMedia(item.mediaUrls, item.text, state.downloadSubfolder, item.id);
+        }
         sendResponse(await getState());
         break;
       }
@@ -439,6 +540,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse(await setState({ logs: [] }));
         break;
       case "ATTACH_ACTIVE_TAB": {
+        if (queueTask) throw new Error("Dừng hàng đợi trước khi đổi tab.");
         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
         if (!tab?.url || !/^https:\/\/(www\.)?midjourney\.com\//i.test(tab.url)) throw new Error("Hãy mở tab Midjourney trước khi gắn tab.");
         sendResponse(await setState({ tabId: tab ? tab.id : null }));
@@ -450,15 +552,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         break;
       case "PAUSE":
         queueEpoch++;
+        wakeQueue();
+        await debugInput.detach();
         sendResponse(await setState({ paused: true, running: false }));
         break;
       case "STOP": {
         queueEpoch++;
+        wakeQueue();
+        await debugInput.detach();
         sendResponse(await setState({ running: false, paused: false, pauseReason: "Đã dừng gửi. Job đã gửi vẫn được theo dõi." }));
         break;
       }
       case "CLEAR":
         queueEpoch++;
+        wakeQueue();
+        await debugInput.detach();
         sendResponse(await setState({ items: [], running: false, paused: false, pauseReason: "" }));
         break;
       default:

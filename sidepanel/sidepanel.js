@@ -24,6 +24,11 @@ const continuousHintEl = document.getElementById("continuousHint");
 const maxInFlightEl = document.getElementById("maxInFlight");
 const queueProgressEl = document.getElementById("queueProgress");
 const queuePauseReasonEl = document.getElementById("queuePauseReason");
+const inputModeEl = document.getElementById("inputMode");
+const debugStatusEl = document.getElementById("debugStatus");
+const queueTimingEl = document.getElementById("queueTiming");
+const retryAllDownloadsBtn = document.getElementById("retryAllDownloads");
+const exportReportBtn = document.getElementById("exportReport");
 const pasteArea = document.getElementById("pasteArea");
 const addFromPasteBtn = document.getElementById("addFromPaste");
 const importTextFile = document.getElementById("importTextFile");
@@ -90,10 +95,27 @@ const STATUS_LABEL = {
 };
 
 let lastState = null;
+let lastQueueRenderKey = "";
+let lastLogsRenderKey = "";
+
+function renderTiming() {
+  if (!lastState) return;
+  const samples = lastState.items.map(item => item.submitDurationMs).filter(Number.isFinite);
+  const average = samples.length ? (samples.reduce((a, b) => a + b, 0) / samples.length / 1000).toFixed(2) : null;
+  const countdown = lastState.running && lastState.nextSubmitAt ? Math.max(0, Math.ceil((lastState.nextSubmitAt - Date.now()) / 1000)) : 0;
+  queueTimingEl.textContent = [countdown ? `Gửi tiếp sau ${countdown}s` : "",
+    average ? `Thời gian gửi trung bình: ${average}s (${samples.length} prompt)` : ""].filter(Boolean).join(" • ");
+}
+setInterval(renderTiming, 1000);
 
 function renderState(state) {
   if (!state) return;
   lastState = state;
+  inputModeEl.value = state.inputMode || "debugger";
+  inputModeEl.disabled = !!state.running;
+  const debugLabels = { off: "chưa kết nối", connecting: "đang kết nối", attached: "đã kết nối", error: "lỗi kết nối" };
+  debugStatusEl.textContent = state.inputMode === "dom" ? "Điều khiển: DOM" : `Điều khiển: Debug / CDP — ${debugLabels[state.debuggerStatus] || "chưa kết nối"}`;
+  renderTiming();
 
   delayMinEl.value = state.delayMinSeconds;
   delayMaxEl.value = state.delayMaxSeconds;
@@ -142,6 +164,9 @@ function renderState(state) {
 
   queueCountEl.textContent = state.items.length;
   emptyHintEl.classList.toggle("hidden", state.items.length > 0);
+  const queueRenderKey = JSON.stringify([state.items, state.downloads]);
+  if (queueRenderKey !== lastQueueRenderKey) {
+  lastQueueRenderKey = queueRenderKey;
   queueListEl.innerHTML = "";
   for (const item of state.items) {
     const li = document.createElement("li");
@@ -207,6 +232,7 @@ function renderState(state) {
     li.appendChild(removeBtn);
     queueListEl.appendChild(li);
   }
+  }
 
   startBtn.disabled = state.running;
   stopBtn.disabled = !state.running;
@@ -214,6 +240,9 @@ function renderState(state) {
 
   const logs = state.logs || [];
   emptyLogHintEl.classList.toggle("hidden", logs.length > 0);
+  const logsRenderKey = JSON.stringify(logs);
+  if (logsRenderKey === lastLogsRenderKey) return;
+  lastLogsRenderKey = logsRenderKey;
   logListEl.innerHTML = "";
   for (const entry of logs) {
     const row = document.createElement("div");
@@ -262,6 +291,26 @@ continuousModeEl.addEventListener("change", async () => {
 });
 maxInFlightEl.addEventListener("change", async () => {
   renderState(await sendMsg({ type: "SET_MAX_IN_FLIGHT", maxInFlight: Number(maxInFlightEl.value) }));
+});
+inputModeEl.addEventListener("change", async () => {
+  renderState(await sendMsg({ type: "SET_INPUT_MODE", inputMode: inputModeEl.value }));
+});
+retryAllDownloadsBtn.addEventListener("click", async () => {
+  retryAllDownloadsBtn.disabled = true;
+  try { renderState(await sendMsg({ type: "RETRY_ALL_DOWNLOADS" })); }
+  finally { retryAllDownloadsBtn.disabled = false; }
+});
+exportReportBtn.addEventListener("click", () => {
+  if (!lastState) return;
+  const report = { version: chrome.runtime.getManifest().version, exportedAt: new Date().toISOString(),
+    inputMode: lastState.inputMode, maxInFlight: lastState.maxInFlight,
+    pauseReason: lastState.pauseReason, items: lastState.items, downloads: lastState.downloads, logs: lastState.logs };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `midjourney-report-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
 });
 
 function setDefaultSetting(field, value) {

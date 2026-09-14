@@ -16,6 +16,7 @@
 }
 
 body {
+  color-scheme: dark;
   margin: 0;
   width: 100%;
   min-width: 260px;
@@ -637,4 +638,6 @@ button.small {
 .queue-item-details .small { align-self: flex-start; }
 .badge.review { color: #fbbf24; background: rgba(251,191,36,.12); }
 .brand-icon { width: 32px; height: 32px; border-radius: 6px; object-fit: contain; flex-shrink: 0; }
+select { min-width: 0; max-width: 100%; width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+select:disabled { opacity: .55; }
 #queuePauseReason { color: #fbbf24; overflow-wrap: anywhere; }
