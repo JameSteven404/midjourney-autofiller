@@ -21,6 +21,9 @@ const delayMinEl = document.getElementById("delayMin");
 const delayMaxEl = document.getElementById("delayMax");
 const continuousModeEl = document.getElementById("continuousMode");
 const continuousHintEl = document.getElementById("continuousHint");
+const maxInFlightEl = document.getElementById("maxInFlight");
+const queueProgressEl = document.getElementById("queueProgress");
+const queuePauseReasonEl = document.getElementById("queuePauseReason");
 const pasteArea = document.getElementById("pasteArea");
 const addFromPasteBtn = document.getElementById("addFromPaste");
 const importTextFile = document.getElementById("importTextFile");
@@ -63,7 +66,14 @@ const cfgVideoResolutionEl = document.getElementById("cfgVideoResolution");
 const cfgVideoBatchSizeEl = document.getElementById("cfgVideoBatchSize");
 
 function sendMsg(msg) {
-  return new Promise((resolve) => chrome.runtime.sendMessage(msg, resolve));
+  return new Promise((resolve) => chrome.runtime.sendMessage(msg, response => {
+    const error = chrome.runtime.lastError?.message || response?.error;
+    if (error) {
+      runWarningEl.textContent = error;
+      runWarningEl.classList.remove("hidden");
+      resolve(null);
+    } else resolve(response);
+  }));
 }
 
 function uid() {
@@ -76,6 +86,7 @@ const STATUS_LABEL = {
   generating: "Đang tạo",
   done: "Xong",
   error: "Lỗi",
+  review: "Cần kiểm tra",
 };
 
 let lastState = null;
@@ -89,6 +100,11 @@ function renderState(state) {
   autoDownloadEl.checked = !!state.autoDownload;
   downloadSubfolderEl.value = state.downloadSubfolder || "";
   continuousModeEl.checked = !!state.continuousMode;
+  maxInFlightEl.value = state.maxInFlight || 1;
+  const active = state.items.filter(item => ["running", "generating"].includes(item.status)).length;
+  const done = state.items.filter(item => item.status === "done").length;
+  queueProgressEl.textContent = `Đã tạo: ${done}/${state.items.length} • Đang gửi/tạo: ${active}/${state.maxInFlight || 1}`;
+  queuePauseReasonEl.textContent = state.pauseReason || "";
   delayMinEl.disabled = !!state.continuousMode;
   delayMaxEl.disabled = !!state.continuousMode;
   if (continuousHintEl) {
@@ -144,13 +160,50 @@ function renderState(state) {
     removeBtn.textContent = "✕";
     removeBtn.title = "Xoá khỏi hàng đợi";
     removeBtn.addEventListener("click", async () => {
-      const s = await sendMsg({ type: "GET_STATE" });
-      const items = s.items.filter((it) => it.id !== item.id);
-      renderState(await sendMsg({ type: "SET_ITEMS", items }));
+      renderState(await sendMsg({ type: "REMOVE_ITEM", id: item.id }));
     });
 
+    const details = document.createElement("div");
+    details.className = "queue-item-details";
+    details.appendChild(text);
+    if (item.note) {
+      const note = document.createElement("small");
+      note.textContent = item.note;
+      details.appendChild(note);
+    }
+    const records = Object.values(state.downloads || {}).filter(record => record.requestId === item.id);
+    if (item.mediaUrls?.length) {
+      const completed = new Set(records.filter(r => r.status === "complete").map(r => r.url)).size;
+      const downloading = records.filter(r => ["downloading", "starting"].includes(r.status));
+      const summary = document.createElement("small");
+      summary.textContent = `Đã tải: ${completed}/${item.mediaUrls.length}` + (downloading.length ? ` • Đang tải: ${downloading.length}` : "");
+      details.appendChild(summary);
+      const errors = [...new Set(records.filter(r => r.status === "interrupted" && r.error).map(r => r.error))];
+      if (errors.length && completed < item.mediaUrls.length) {
+        const error = document.createElement("small");
+        error.textContent = errors.join(" • ");
+        details.appendChild(error);
+      }
+      if (completed < item.mediaUrls.length && downloading.length === 0) {
+        const retry = document.createElement("button");
+        retry.className = "ghost small";
+        retry.textContent = "Tải ảnh còn thiếu";
+        retry.addEventListener("click", async () => {
+          retry.disabled = true;
+          renderState(await sendMsg({ type: "RETRY_DOWNLOAD", id: item.id }));
+        });
+        details.appendChild(retry);
+      }
+    }
+    if (item.status === "review") {
+      const checked = document.createElement("button");
+      checked.className = "ghost small";
+      checked.textContent = "Đã kiểm tra trên Midjourney — bỏ qua";
+      checked.addEventListener("click", async () => renderState(await sendMsg({ type: "CONFIRM_REVIEW", id: item.id })));
+      details.appendChild(checked);
+    }
     li.appendChild(badge);
-    li.appendChild(text);
+    li.appendChild(details);
     li.appendChild(removeBtn);
     queueListEl.appendChild(li);
   }
@@ -206,6 +259,9 @@ autoDownloadEl.addEventListener("change", async () => {
 
 continuousModeEl.addEventListener("change", async () => {
   renderState(await sendMsg({ type: "SET_CONTINUOUS_MODE", continuousMode: continuousModeEl.checked }));
+});
+maxInFlightEl.addEventListener("change", async () => {
+  renderState(await sendMsg({ type: "SET_MAX_IN_FLIGHT", maxInFlight: Number(maxInFlightEl.value) }));
 });
 
 function setDefaultSetting(field, value) {
@@ -266,9 +322,8 @@ attachTabQuickBtn.addEventListener("click", async () => {
 async function appendPrompts(lines) {
   const cleaned = lines.map((l) => l.trim()).filter((l) => l.length > 0);
   if (cleaned.length === 0) return;
-  const state = await sendMsg({ type: "GET_STATE" });
   const newItems = cleaned.map((text) => ({ id: uid(), text, status: "pending", note: "" }));
-  renderState(await sendMsg({ type: "SET_ITEMS", items: [...state.items, ...newItems] }));
+  renderState(await sendMsg({ type: "APPEND_ITEMS", items: newItems }));
 }
 
 addFromPasteBtn.addEventListener("click", async () => {

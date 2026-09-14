@@ -5,8 +5,7 @@
 const SUBMIT_CLEAR_TIMEOUT_MS = 1800;
 const SUBMIT_CLEAR_POLL_MS = 120;
 const WATCHER_INTERVAL_MS = 4000;
-const JOB_TIMEOUT_MS = 3 * 60 * 1000;
-const PROMPT_MATCH_PREFIX_LEN = 48;
+const JOB_TIMEOUT_MS = 30 * 60 * 1000;
 const MJ_CDN_PREFIX = "https://cdn.midjourney.com/";
 const SEND_ICON_PATH_PREFIX = "M3.82715 4.39551";
 
@@ -68,6 +67,14 @@ function findErrorBanner() {
       text.includes("failed") ||
       text.includes("error") ||
       text.includes("queue is full")
+      || text.includes("queue full")
+      || text.includes("too many")
+      || text.includes("maximum number")
+      || text.includes("reached your limit")
+      || text.includes("try again later")
+      || text.includes("job limit")
+      || text.includes("prompt limit")
+      || text.includes("out of hours")
     ) {
       return (el.innerText || "").trim();
     }
@@ -98,20 +105,13 @@ function getPromptTextForGrid(grid) {
   return normalizePromptText(rawText);
 }
 
-function scoreMatch(candidateText, targetText) {
-  if (!candidateText || !targetText) return 0;
-  if (candidateText === targetText) return 1000;
-  if (candidateText.startsWith(targetText)) return 500;
-  if (targetText.startsWith(candidateText)) return 400;
-  if (candidateText.includes(targetText)) return 300;
-  if (targetText.includes(candidateText)) return 250;
-  const prefix = targetText.slice(0, PROMPT_MATCH_PREFIX_LEN);
-  const suffix = targetText.slice(-PROMPT_MATCH_PREFIX_LEN);
-  if (candidateText.startsWith(prefix) || candidateText.includes(prefix) || candidateText.includes(suffix)) return 200;
-  return 0;
+const claimedGridKeys = new Set();
+function gridKey(grid) {
+  const href = grid.parentElement?.querySelector('a[href*="/jobs/"]')?.getAttribute("href");
+  return href || getGridImageUrls(grid).slice().sort().join("|");
 }
 
-function findGridForText(text) {
+function findGridForText(text, job = {}) {
   const target = normalizePromptText(text);
   if (!target) return null;
   const grids = getAllMediaGrids();
@@ -119,8 +119,11 @@ function findGridForText(text) {
 
   const ranked = [];
   for (const g of grids) {
+    const key = gridKey(g);
+    if (!key || claimedGridKeys.has(key) || job.excludedKeys?.includes(key)) continue;
     const candidate = getPromptTextForGrid(g);
-    const score = scoreMatch(candidate, target);
+    // Similar prefixes are not enough evidence to download this job's images.
+    const score = candidate === target ? 1000 : 0;
     if (score > 0) ranked.push({ grid: g, score });
   }
 
@@ -155,40 +158,6 @@ function getGridImageUrls(grid) {
     }
   }
   return Array.from(urls);
-}
-
-// Chuyển ảnh xem trước .webp sang blob PNG, tạo blob: URL NGAY TRONG TRANG
-// (không phải service worker của background.js). Lý do: chrome.downloads.download()
-// với URL kiểu "data:" bị Chrome Safe Browsing/download-protection coi là "chưa xác
-// minh nguồn gốc" (không có origin trang web thật để đối chiếu) nên tải bị treo vĩnh
-// viễn ở dạng file .tmp tên GUID ngẫu nhiên, không bao giờ hoàn tất. blob: URL được
-// tạo trong context của trang midjourney.com thật (có origin đáng tin) không gặp vấn
-// đề này, và tồn tại được miễn là tab còn mở (đủ thời gian cho download hoàn tất).
-async function convertUrlToPngBlobUrl(sourceUrl) {
-  const res = await fetch(sourceUrl);
-  const srcBlob = await res.blob();
-  const bitmap = await createImageBitmap(srcBlob);
-  const canvas = document.createElement("canvas");
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(bitmap, 0, 0);
-  const pngBlob = await new Promise((resolve, reject) => {
-    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob trả về null"))), "image/png");
-  });
-  return URL.createObjectURL(pngBlob);
-}
-
-async function convertUrlsToPngBlobUrls(urls) {
-  const results = await Promise.all(
-    urls.map((u) =>
-      convertUrlToPngBlobUrl(u).catch((err) => {
-        console.warn("[MJ Auto-Filler] Lỗi chuyển đổi PNG cho", u, err);
-        return null;
-      })
-    )
-  );
-  return results.filter(Boolean);
 }
 
 function hasSendButtonHint(btn) {
@@ -275,48 +244,53 @@ function stopWatcherIfIdle() {
   }
 }
 
-// checkPendingJobs() chạy đồng bộ trong setInterval, nhưng việc chuyển ảnh sang
-// PNG (fetch + canvas) là bất đồng bộ — nên tách phần báo kết quả "đã xong" ra
-// hàm riêng, gọi kiểu fire-and-forget (không await trong tick của interval).
+// Keep tracking until the worker acknowledges the result.
 async function reportJobDone(requestId, grid) {
   const rawUrls = getGridImageUrls(grid);
-  const mediaUrls = await convertUrlsToPngBlobUrls(rawUrls);
-  chrome.runtime.sendMessage({
+  const mediaUrls = rawUrls;
+  const response = await chrome.runtime.sendMessage({
     type: "MJ_JOB_RESULT",
     requestId,
     ok: true,
-    note: mediaUrls.length > 0 ? "Đã tạo xong ảnh." : "Đã tạo xong ảnh nhưng không chuyển được sang PNG để tải.",
+    note: mediaUrls.length > 0 ? "Đã tạo xong ảnh; có link nguồn để tải." : "Đã tạo xong ảnh nhưng chưa tìm thấy link tải.",
     mediaUrls,
+    gridKey: gridKey(grid),
   });
+  if (!response?.ok) throw new Error(response?.error || "Worker chưa xác nhận kết quả.");
 }
 
 function checkPendingJobs() {
   const errNow = findErrorBanner();
   const now = Date.now();
 
-  for (const [requestId, job] of Array.from(pendingJobs.entries())) {
-    if (errNow) {
-      pendingJobs.delete(requestId);
-      chrome.runtime.sendMessage({ type: "MJ_JOB_RESULT", requestId, ok: false, rateLimited: true, note: errNow });
-      continue;
-    }
+  if (errNow) chrome.runtime.sendMessage({ type: "MJ_PAGE_BLOCKED", note: errNow }).catch(() => {});
 
-    const grid = findGridForText(job.text);
+  for (const [requestId, job] of Array.from(pendingJobs.entries())) {
+    if (job.reporting) continue;
+    const grid = findGridForText(job.text, job);
     if (grid && gridIsFullyLoaded(grid)) {
-      pendingJobs.delete(requestId);
-      reportJobDone(requestId, grid);
+      const key = gridKey(grid);
+      claimedGridKeys.add(key);
+      job.reporting = true;
+      reportJobDone(requestId, grid).then(() => pendingJobs.delete(requestId)).catch(() => {
+        job.reporting = false;
+        claimedGridKeys.delete(key);
+      });
       continue;
     }
 
     if (now - job.startedAt > JOB_TIMEOUT_MS) {
-      pendingJobs.delete(requestId);
+      job.reporting = true;
       chrome.runtime.sendMessage({
         type: "MJ_JOB_RESULT",
         requestId,
-        ok: true,
-        note: "Không xác nhận được thời điểm tạo xong trong 3 phút — kiểm tra thủ công trên Midjourney.",
+        ok: false,
+        note: "Chưa xác nhận tạo xong sau 30 phút — kiểm tra job trên Midjourney; không tự gửi lại.",
         mediaUrls: [],
-      });
+      }).then(response => {
+        if (!response?.ok) throw new Error("Worker chưa xác nhận hết thời gian theo dõi.");
+        pendingJobs.delete(requestId);
+      }).catch(() => { job.reporting = false; });
     }
   }
 
@@ -339,7 +313,7 @@ function reconcilePendingJobs() {
     if (chrome.runtime.lastError || !Array.isArray(items) || items.length === 0) return;
     for (const it of items) {
       if (!pendingJobs.has(it.requestId)) {
-        pendingJobs.set(it.requestId, { text: it.text, startedAt: Date.now() });
+        pendingJobs.set(it.requestId, { text: it.text, startedAt: it.startedAt || Date.now(), excludedKeys: it.excludedKeys || [] });
       }
     }
     if (pendingJobs.size > 0) ensureWatcher();
@@ -656,9 +630,11 @@ async function ensureDefaultSettings(config) {
 }
 
 async function fillAndSubmit(text, requestId, settingsConfig) {
+  const beforeError = findErrorBanner();
+  if (beforeError) return { ok: false, rateLimited: true, notSubmitted: true, note: beforeError };
   const textarea = findPromptTextarea();
   if (!textarea) {
-    return { ok: false, note: "Không tìm thấy ô nhập prompt (#desktop_input_bar). Giao diện Midjourney có thể đã đổi." };
+    return { ok: false, notSubmitted: true, note: "Không tìm thấy ô nhập prompt (#desktop_input_bar). Giao diện Midjourney có thể đã đổi." };
   }
 
   // Không chặn việc gửi prompt nếu áp cấu hình mặc định thất bại — vẫn gửi
@@ -671,6 +647,8 @@ async function fillAndSubmit(text, requestId, settingsConfig) {
   await sleep(200);
 
   const submitBtn = findSubmitButton(textarea);
+  const excludedKeys = getAllMediaGrids().map(gridKey).filter(Boolean);
+  const startedAt = Date.now();
   if (submitBtn) {
     if (submitBtn.disabled) {
       return {
@@ -686,6 +664,8 @@ async function fillAndSubmit(text, requestId, settingsConfig) {
   }
 
   const sent = await waitForPromptToClear(textarea);
+  const err = findErrorBanner();
+  if (err) return { ok: false, rateLimited: true, note: err };
   if (!sent) {
     return {
       ok: false,
@@ -695,22 +675,17 @@ async function fillAndSubmit(text, requestId, settingsConfig) {
     };
   }
 
-  const err = findErrorBanner();
-  if (err) {
-    return { ok: false, rateLimited: true, note: err };
-  }
-
-  pendingJobs.set(requestId, { text: normalizePromptText(text), startedAt: Date.now() });
+  pendingJobs.set(requestId, { text: normalizePromptText(text), startedAt, excludedKeys });
   ensureWatcher();
 
-  return { ok: true, submitted: true, note: "Đã gửi, đang chờ Midjourney tạo ảnh..." + settingsNote };
+  return { ok: true, submitted: true, excludedKeys, startedAt, note: "Đã gửi, đang chờ Midjourney tạo ảnh..." + settingsNote };
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "FILL_AND_SUBMIT_MJ") {
-    fillAndSubmit(msg.text, msg.requestId, msg.settingsConfig).then(sendResponse);
+    fillAndSubmit(msg.text, msg.requestId, msg.settingsConfig).then(sendResponse)
+      .catch(err => sendResponse({ ok: false, note: String(err.message || err) }));
     return true;
   }
   return false;
 });
-

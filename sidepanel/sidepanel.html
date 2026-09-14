@@ -9,7 +9,7 @@
   <div class="app">
     <header class="topbar">
       <div class="title-row">
-        <span class="dot"></span>
+        <img class="brand-icon" src="../icons/portrait.png" alt="Icon tiện ích" width="32" height="32" />
         <h1>Midjourney Auto-Filler</h1>
       </div>
       <p class="subtitle">Tự động điền &amp; gửi hàng loạt prompt cho Midjourney web.</p>
@@ -53,6 +53,8 @@
         </div>
         <ul id="queueList" class="queue-list"></ul>
         <p class="empty-hint" id="emptyHint">Chưa có prompt nào trong hàng đợi.</p>
+        <p class="hint" id="queueProgress"></p>
+        <p class="hint" id="queuePauseReason"></p>
       </div>
     </section>
 
@@ -154,9 +156,11 @@
           </label>
           <label for="continuousMode" class="toggle-label">Chế độ làm liên tục (không chờ giữa prompt)</label>
         </div>
-        <p class="hint">Random hoá thời gian chờ giúp nhịp gửi prompt tự nhiên hơn, giảm rủi ro bị giới hạn tốc độ.</p>
+        <label class="settings-field-label" for="maxInFlight">Số prompt đang tạo tối đa</label>
+        <input type="number" id="maxInFlight" min="1" max="10" value="1" />
+        <p class="hint">Mặc định 1. Chỉ tăng trong giới hạn tài khoản Midjourney của bạn. Tool chờ job hoàn tất trước khi lấy chỗ cho prompt tiếp theo.</p>
         <p class="hint continuous-hint" id="continuousHint">
-          Bật “làm liên tục” để gửi sát nhau tối đa; thường cần tắt nếu hay gặp lỗi giới hạn tốc độ.
+          Bỏ khoảng nghỉ khi còn chỗ trống. Vẫn tuân theo số prompt đang tạo tối đa và dừng khi Midjourney báo giới hạn.
         </p>
       </div>
 
@@ -169,7 +173,7 @@
           <label for="autoDownload" class="toggle-label">Tự động tải ảnh xuống Downloads</label>
         </div>
         <input type="text" id="downloadSubfolder" placeholder="Thư mục con, VD: midjourney-output" />
-        <p class="hint">Tự động chuyển sang định dạng .png khi tải (ảnh gốc trên Midjourney là .webp). Tên file có kèm ngày giờ để không bị trùng. Chrome chỉ tải được vào bên trong thư mục Downloads mặc định (kèm thư mục con) — muốn đổi ổ đĩa/thư mục khác, đổi Downloads mặc định trong chrome://settings.</p>
+        <p class="hint">Tải trực tiếp ảnh từ link CDN, giữ định dạng nguồn (.webp, .png…). Đây là ảnh hiện trong lưới kết quả, chưa đảm bảo độ phân giải gốc. Chỉ báo tải xong khi trình duyệt xác nhận. Có thể tải lại file lỗi ngay trong hàng đợi. File nằm trong Downloads/thư mục con đã chọn.</p>
       </div>
     </section>
 

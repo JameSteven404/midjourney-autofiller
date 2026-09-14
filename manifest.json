@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Midjourney Prompt Auto-Filler",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Tự động điền và gửi hàng loạt prompt cho Midjourney web.",
   "permissions": ["storage", "activeTab", "tabs", "sidePanel", "downloads", "scripting"],
   "host_permissions": [
@@ -13,7 +13,13 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Midjourney Prompt Auto-Filler"
+    "default_title": "Midjourney Prompt Auto-Filler",
+    "default_icon": {
+      "16": "icons/portrait.png",
+      "32": "icons/portrait.png",
+      "48": "icons/portrait.png",
+      "128": "icons/portrait.png"
+    }
   },
   "side_panel": {
     "default_path": "sidepanel/sidepanel.html"
@@ -26,8 +32,8 @@
     }
   ],
   "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
+    "16": "icons/portrait.png",
+    "48": "icons/portrait.png",
+    "128": "icons/portrait.png"
   }
 }
