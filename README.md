@@ -1,4 +1,16 @@
-# Midjourney Prompt Auto-Filler 1.4.1
+# Midjourney Prompt Auto-Filler 1.4.2
+
+## 1.4.2 (16/09/2026) — nghi vấn ảnh ngoài khung nhìn không được nhận là đã xong
+
+Người dùng báo trực tiếp: ảnh đã tạo xong trên Midjourney nhưng tool vẫn báo "Đang tạo", và vì vậy không tự tải ảnh về (điều kiện tự tải đứng sau việc job phải chuyển "Xong"). Hai triệu chứng này cùng gốc: `checkPendingJobs()` không khớp được lưới kết quả với prompt đã gửi thì job không bao giờ qua khỏi "Đang tạo", nên `autoDownload` cũng không có gì để tải.
+
+**Chưa xác nhận được nguyên nhân gốc trên 1 batch thật** (cần thời gian tạo ảnh thật + tài khoản thật, không mô phỏng được bằng Node) — nghi vấn hàng đầu, theo gợi ý đối chiếu với cách các tool tự động hoá khác xử lý: Midjourney nhiều khả năng **ảo hoá/lazy-load ảnh nằm ngoài khung nhìn** hiện tại của trang — lưới kết quả của job nếu rơi ngoài viewport có thể không bao giờ thực sự tải/render `<img>` trong DOM, khiến điều kiện `gridIsFullyLoaded()` (đòi hỏi mọi ảnh trong lưới có `src` CDN thật + `naturalWidth > 0`) không bao giờ đúng.
+
+- **Tự thu nhỏ zoom tab Midjourney xuống 50%** (`chrome.tabs.setZoom`, quyền `tabs` đã có sẵn) trong suốt lúc hàng đợi đang chạy, để nhiều lưới kết quả cùng lúc "lọt" vào khung nhìn hơn; khôi phục lại zoom gốc của trình duyệt ngay khi dừng/tạm dừng/lỗi (mọi nhánh thoát của `processQueue`).
+- **Thêm cảnh báo chẩn đoán cụ thể sau 90 giây** chưa khớp được job (thay vì im lặng tới hết 30 phút mới báo "Cần kiểm tra" chung chung): log phân biệt rõ "không tìm thấy lưới kết quả nào" / "có lưới nhưng không đọc được nội dung prompt" / "có lưới đọc được prompt nhưng không cái nào khớp" / "khớp đúng lưới nhưng ảnh bên trong chưa được coi là tải xong" — để biết chính xác selector nào (`mediaGrid`, `promptText`, hay điều kiện tải ảnh) đang lệch với giao diện Midjourney thật, nếu zoom không giải quyết dứt điểm.
+- Thêm 6 kiểm thử cho phần chẩn đoán và zoom.
+
+Cần chạy thử trên batch thật để xác nhận: (1) zoom 50% có đủ để lưới kết quả luôn vào khung nhìn không — có thể cần chỉnh `RESULT_GRID_ZOOM` trong background.js nếu chưa đủ, (2) zoom không làm lệch toạ độ click của chế độ Debug/CDP (theo lý thuyết không lệch vì `getBoundingClientRect()` và `Input.dispatchMouseEvent` cùng nằm trong không gian viewport đã zoom, nhưng chưa tự kiểm chứng trực tiếp).
 
 ## 1.4.1 (16/09/2026) — dọn rác, sửa lệch regex, bắt đầu dùng git
 

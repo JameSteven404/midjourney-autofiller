@@ -29,7 +29,8 @@ async function background(initial = {}) {
     runtime: { onMessage: event(), sendMessage: async message => { messages.push(message); } },
     tabs: { onUpdated: event(), onRemoved: event(), sendMessage(id, message, cb) { calls.push(message); cb({ ok: true, submitted: true }); },
       get: async id => ({ id, url: 'https://www.midjourney.com/imagine' }),
-      query: async () => [{ id: 7, url: 'https://www.midjourney.com/imagine' }] },
+      query: async () => [{ id: 7, url: 'https://www.midjourney.com/imagine' }],
+      setZoom: async () => {} },
     debugger: { onDetach: event(), attach: async () => {}, detach: async () => {}, sendCommand: async () => ({ result: { value: true } }) },
     scripting: { executeScript: async () => {} },
     downloads: { onChanged: event(), onDeterminingFilename: event(), async download(options) {
@@ -113,6 +114,27 @@ test('similar prompts and historical grids cannot be selected for download', () 
   assert.equal(c.findGridForText('test prompt', { excludedKeys: ['old'] }), null);
   c.getAllMediaGrids = () => [old, near, fresh];
   assert.equal(c.findGridForText('test prompt', { excludedKeys: ['old'] }), fresh);
+});
+
+test('diagnoseNoMatch names exactly which assumption about the Midjourney page is failing', () => {
+  const { context: c } = content();
+  assert.match(c.diagnoseNoMatch('test', []), /Không tìm thấy lưới/);
+  assert.match(c.diagnoseNoMatch('test', [{ text: '' }, { text: '' }]), /không đọc được nội dung prompt/);
+  assert.match(c.diagnoseNoMatch('test prompt', [{ text: 'a different prompt' }]), /không cái nào khớp/);
+  assert.match(c.diagnoseNoMatch('test prompt', [{ text: 'test prompt' }]), /chưa được tool coi là tải xong/);
+});
+
+test('a stalled job is warned about once after 90s, not spammed every tick', () => {
+  const { context: c, messages } = content();
+  c.findErrorBanner = () => null;
+  c.getAllMediaGrids = () => [];
+  vm.runInContext('pendingJobs.set("one", { text: "test", startedAt: Date.now() - 91000 }); checkPendingJobs()', c);
+  let warnings = messages.filter(m => m.type === 'MJ_JOB_STALL_WARNING');
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0].note, /Không tìm thấy lưới/);
+  vm.runInContext('checkPendingJobs()', c);
+  warnings = messages.filter(m => m.type === 'MJ_JOB_STALL_WARNING');
+  assert.equal(warnings.length, 1);
 });
 
 test('download is not complete at acceptance; extension matches source bytes format', async () => {
@@ -269,6 +291,18 @@ test('async result is not overwritten by submit acknowledgement', async () => {
   assert.equal(b.state().items[0].status, 'done');
 });
 
+test('a stall warning only logs a diagnostic; it never touches item status or pauses the queue', async () => {
+  const b = await background({ tabId: 7,
+    items: [{ id: 'one', text: 'a caveman prompt', status: 'generating', tabId: 7 }] });
+  b.chrome.runtime.onMessage.listeners[0](
+    { type: 'MJ_JOB_STALL_WARNING', requestId: 'one', note: 'ly do chan doan test' },
+    { tab: { id: 7 } }, () => {});
+  await until(() => b.state().logs.some(l => /ly do chan doan test/.test(l.message)));
+  assert.equal(b.state().items[0].status, 'generating');
+  assert.equal(b.state().paused, false);
+  assert.equal(b.state().pauseReason, '');
+});
+
 test('concurrent state updates retain both completion and settings', async () => {
   const b = await background({ items: [{ id: 'one', text: 'first', status: 'generating' }] });
   await Promise.all([b.context.handleJobResult({ requestId: 'one', ok: true }),
@@ -379,6 +413,14 @@ test('debugger connects once per queue and detaches after the final submit', asy
   assert.equal(attached, 1);
   assert.equal(detached, 1);
   assert.equal(b.calls[0].inputMode, 'debugger');
+});
+
+test('queue zooms the result tab out while running and restores zoom on exit', async () => {
+  const b = await background({ tabId: 7, continuousMode: true, items: [{ id: 'one', text: 'first', status: 'pending' }] });
+  const zooms = [];
+  b.chrome.tabs.setZoom = async (tabId, factor) => { zooms.push([tabId, factor]); };
+  await b.context.runQueue();
+  assert.deepEqual(zooms, [[7, 0.5], [7, 0]]);
 });
 
 test('debugger attach failure does not attempt input or submit', async () => {

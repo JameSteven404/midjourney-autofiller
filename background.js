@@ -6,6 +6,9 @@ const ACTION_TYPE = "FILL_AND_SUBMIT_MJ";
 const STORAGE_KEY = "paf_state";
 
 const MAX_LOGS = 300;
+// Zoom tab về mức này khi chạy hàng đợi để nhiều lưới kết quả lọt vào khung
+// nhìn hơn, tránh ảnh bị lazy-load/ảo hoá ngoài viewport không bao giờ render.
+const RESULT_GRID_ZOOM = 0.5;
 
 const DEFAULT_STATE = {
   items: [], // { id, text, status: 'pending'|'running'|'generating'|'done'|'error', note }
@@ -469,6 +472,7 @@ async function runQueue() {
 }
 
 async function processQueue(epoch) {
+  let zoomTabId = null;
   try {
     let state = await getState();
     if (!state.tabId) throw new Error("Chưa gắn tab Midjourney.");
@@ -478,6 +482,14 @@ async function processQueue(epoch) {
       throw new Error("Tab đã gắn không còn tồn tại hoặc không phải Midjourney. Gắn lại tab rồi chạy lại.");
     }
     await setState({ running: true, paused: false, pauseReason: "" });
+    // Midjourney nhiều khả năng ảo hoá/lazy-load ảnh nằm ngoài khung nhìn —
+    // job xong nhưng lưới của nó chưa từng thực sự render/tải trong DOM thì
+    // gridIsFullyLoaded() ở content script không bao giờ đúng, kẹt "Đang tạo"
+    // mãi. Thu nhỏ zoom tab để nhiều lưới kết quả hơn lọt vào khung nhìn;
+    // khôi phục lại zoom gốc (0 = mặc định của trình duyệt) ở finally bên
+    // dưới, dù dừng bằng cách nào (xong hàng đợi, lỗi, Dừng, Tạm dừng).
+    zoomTabId = state.tabId;
+    await chrome.tabs.setZoom(zoomTabId, RESULT_GRID_ZOOM).catch(() => {});
     if (state.inputMode === "debugger") await debugInput.attach(state.tabId);
     await log("info", "Bắt đầu hàng đợi. Tối đa " + flightLimit(state) + " prompt đang tạo.");
     let reportedWait = false;
@@ -540,6 +552,7 @@ async function processQueue(epoch) {
     await pauseQueue(String(err.message || err));
   } finally {
     await debugInput.detach();
+    if (zoomTabId != null) await chrome.tabs.setZoom(zoomTabId, 0).catch(() => {});
   }
 }
 
@@ -634,6 +647,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     startupReady.then(async () => {
       const state = await getState();
       if (sender.tab?.id === state.tabId && state.running) await pauseQueue(msg.note);
+    }).catch(console.error);
+    return false;
+  }
+  if (msg.type === "MJ_JOB_STALL_WARNING") {
+    // Chỉ ghi log để biết chính xác lý do chưa khớp được kết quả — không đổi
+    // trạng thái item, không dừng hàng đợi (job có thể vẫn đang tạo bình
+    // thường, chỉ là selector dò lưới kết quả chưa khớp được).
+    startupReady.then(async () => {
+      const state = await getState();
+      const item = state.items.find((it) => it.id === msg.requestId);
+      const label = item ? item.text.slice(0, 60) : msg.requestId;
+      await log("error", `Chưa xác nhận được kết quả cho "${label}" sau 90s: ${msg.note}`);
     }).catch(console.error);
     return false;
   }

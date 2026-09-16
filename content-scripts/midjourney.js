@@ -15,6 +15,11 @@ const MIN_JOB_DURATION_MS = 8000;
 // khoảng này, phòng trường hợp DOM đổi ảnh xem trước ngay sau khi khớp lần
 // đầu (vd. ảnh mờ tạm thời được thay bằng ảnh thật, đổi luôn key của lưới).
 const CONFIRM_STABLE_MS = 1500;
+// Nếu sau ngần này vẫn chưa khớp được lưới nào cho job, báo 1 lần lên Nhật ký
+// kèm lý do cụ thể — thay vì im lặng tới hết JOB_TIMEOUT_MS (30 phút) mới báo
+// "Cần kiểm tra" chung chung. Đủ dài để không báo nhầm lúc Midjourney còn
+// đang vẽ ảnh thật (bình thường vẫn lâu hơn 8s của MIN_JOB_DURATION_MS).
+const NO_MATCH_WARN_MS = 90 * 1000;
 const MJ_CDN_PREFIX = "https://cdn.midjourney.com/";
 const SEND_ICON_PATH_PREFIX = "M3.82715 4.39551";
 
@@ -318,6 +323,25 @@ async function reportJobDone(requestId, grid) {
   if (!response?.ok) throw new Error(response?.error || "Worker chưa xác nhận kết quả.");
 }
 
+// Phân biệt cụ thể lý do chưa khớp được lưới nào cho job, để log lên side
+// panel chỉ đúng điểm nghi vấn thay vì chỉ nói chung chung "chưa xong" — nhất
+// là khi Midjourney đổi cấu trúc DOM/class name khiến các hàm getAllMediaGrids/
+// getPromptTextForGrid/gridIsFullyLoaded không còn khớp trang thật nữa.
+function diagnoseNoMatch(text, snapshots) {
+  if (snapshots.length === 0) {
+    return "Không tìm thấy lưới ảnh kết quả nào trên trang — selector mediaGrid có thể đã đổi so với giao diện Midjourney hiện tại.";
+  }
+  const withText = snapshots.filter((s) => s.text).length;
+  if (withText === 0) {
+    return `Tìm thấy ${snapshots.length} lưới kết quả nhưng không đọc được nội dung prompt của lưới nào — selector promptText có thể đã đổi.`;
+  }
+  const target = normalizePromptText(text);
+  if (!snapshots.some((s) => s.text === target)) {
+    return `Tìm thấy ${snapshots.length} lưới kết quả (đọc được prompt ở ${withText}) nhưng không cái nào khớp đúng nội dung prompt đã gửi — trang có thể hiển thị prompt khác với nội dung đã gửi.`;
+  }
+  return "Đã khớp đúng lưới kết quả nhưng ảnh bên trong chưa được tool coi là tải xong hết (thiếu src CDN Midjourney, hoặc naturalWidth = 0) — có thể do mạng chậm hoặc Midjourney đổi cách hiển thị ảnh trong lưới.";
+}
+
 function checkPendingJobs() {
   const errNow = findErrorBanner();
   const now = Date.now();
@@ -349,6 +373,11 @@ function checkPendingJobs() {
         continue;
       }
       job.confirmingKey = null;
+    }
+
+    if (!job.warnedNoMatch && now - job.startedAt >= NO_MATCH_WARN_MS) {
+      job.warnedNoMatch = true;
+      chrome.runtime.sendMessage({ type: "MJ_JOB_STALL_WARNING", requestId, note: diagnoseNoMatch(job.text, snapshots) }).catch(() => {});
     }
 
     if (now - job.startedAt > JOB_TIMEOUT_MS) {
