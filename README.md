@@ -1,4 +1,13 @@
-# Midjourney Prompt Auto-Filler 1.4.0
+# Midjourney Prompt Auto-Filler 1.4.1
+
+## 1.4.1 (16/09/2026) — dọn rác, sửa lệch regex, bắt đầu dùng git
+
+Đợt review code cùng Claude Code, không đổi hành vi gửi/tải prompt:
+
+- **`{prompt}` bỏ sót đuôi tham số khi gạch ngang bị tự động co lại**: `promptWithoutParams` trước chỉ nhận đúng 2 ký tự gạch ngang để cắt phần `--ar 16:9 --seed …`, trong khi `seedFromPrompt` đã nhận 1-2 ký tự từ bản 1.4.0 (Excel/Word có thể tự co `--` thành 1 gạch ngang dài `–`). Lệch nhau nên gặp đúng trường hợp đó, `{seed}` vẫn lấy đúng nhưng `{prompt}` bị dính cả đuôi tham số. Đã đồng bộ về `{1,2}` cho cả hai. Thêm kiểm thử riêng cho trường hợp này.
+- **`state.downloads` không bao giờ được dọn**: mỗi ảnh tải xong thêm một bản ghi tồn tại vĩnh viễn, kể cả sau khi xoá prompt khỏi hàng đợi hoặc bấm "Xoá hàng đợi" — tích tụ vô hạn theo `chrome.storage.local` (giới hạn 10MB, tiện ích chưa xin quyền `unlimitedStorage`), làm mỗi lần đọc/ghi/broadcast state chậm dần theo thời gian dùng. Giờ bản ghi tải bị xoá theo đúng lúc item chủ của nó rời khỏi hàng đợi (xoá từng mục, Xoá mục đã xong, Xoá hàng đợi), và tự dọn một lần lúc khởi động cho phần đã tồn đọng từ trước bản vá này.
+- Bỏ handler `SET_ITEMS` trong background.js — không còn nơi nào trong tiện ích gửi message này.
+- Bắt đầu quản lý version bằng git (trong chính thư mục này) thay vì tự nén `.zip`/`.rar` thủ công; lịch sử các bản trước đó đã được phục hồi lại từ các bản nén cũ.
 
 ## 1.4.0 (15/09/2026) — đổi tên file theo seed
 

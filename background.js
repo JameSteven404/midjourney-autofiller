@@ -75,6 +75,16 @@ function updateItem(id, patch) {
   return setState(state => ({ items: state.items.map(item => item.id === id ? { ...item, ...patch } : item) }));
 }
 
+// state.downloads chỉ hữu ích khi còn item tương ứng trong hàng đợi để hiển
+// thị tiến độ tải/nút "Tải ảnh còn thiếu" — item bị xoá thì bản ghi tải của
+// nó cũng nên mất theo. Không dọn thì downloads phình vô hạn suốt vòng đời
+// lưu trữ (không được reset khi Xoá hàng đợi), làm mỗi lần đọc/ghi/broadcast
+// state chậm dần và có thể chạm quota 10MB của chrome.storage.local.
+function pruneDownloadsFor(downloads, survivingIds) {
+  const keep = new Set(survivingIds);
+  return Object.fromEntries(Object.entries(downloads).filter(([, record]) => keep.has(record.requestId)));
+}
+
 function broadcast(state) {
   chrome.runtime.sendMessage({ type: "STATE_UPDATE", state }).catch(() => {});
 }
@@ -557,20 +567,28 @@ async function handleJobResult(msg, sender) {
 
 // Worker restart does not prove that an interrupted submit failed.
 const startupReady = (async () => {
-  await setState(state => ({ running: false, debuggerStatus: "off", debuggerTabId: null, nextSubmitAt: null,
-    // Nâng mẫu tên file cũ lên mẫu có seed; chỉ đụng vào khi người dùng vẫn
-    // đang để đúng mẫu mặc định trước đây, không ghi đè mẫu tự đặt.
-    filenameTemplate: state.filenameTemplate === "{index}_{n}" ? "{index}_{seed}_{n}" : state.filenameTemplate,
-    paused: state.running ? true : state.paused,
-    pauseReason: state.running ? "Tiện ích vừa khởi động lại. Kiểm tra job đang gửi rồi bấm Chạy để tiếp tục." : state.pauseReason,
+  await setState(state => {
     // Mục thêm từ bản cũ chưa có orderIndex — gán theo đúng vị trí hiện tại
     // để tên file vẫn đánh số liền mạch thay vì rơi về 000.
-    items: state.items.map((it, i) => {
+    const items = state.items.map((it, i) => {
       const withOrder = it.orderIndex ? it : { ...it, orderIndex: i + 1 };
       return withOrder.status === "running"
         ? { ...withOrder, status: "review", note: "Tiện ích khởi động lại khi đang gửi; cần kiểm tra trên Midjourney." }
         : withOrder;
-    }) }));
+    });
+    return { running: false, debuggerStatus: "off", debuggerTabId: null, nextSubmitAt: null,
+      // Nâng mẫu tên file cũ lên mẫu có seed; chỉ đụng vào khi người dùng vẫn
+      // đang để đúng mẫu mặc định trước đây, không ghi đè mẫu tự đặt.
+      filenameTemplate: state.filenameTemplate === "{index}_{n}" ? "{index}_{seed}_{n}" : state.filenameTemplate,
+      paused: state.running ? true : state.paused,
+      pauseReason: state.running ? "Tiện ích vừa khởi động lại. Kiểm tra job đang gửi rồi bấm Chạy để tiếp tục." : state.pauseReason,
+      items,
+      // Dọn một lần lúc khởi động các bản ghi tải của item đã không còn trong
+      // hàng đợi (vd. bị xoá ở bản cũ trước khi có pruneDownloadsFor) — giải
+      // phóng ngay phần đã tích tụ, không phải đợi người dùng bấm Xoá hàng đợi.
+      downloads: pruneDownloadsFor(state.downloads, items.map(it => it.id)),
+    };
+  });
   const state = await getState();
   for (const [id, record] of Object.entries(state.downloads)) {
     if (record.status === "downloading") await recordDownloadStatus(id);
@@ -649,10 +667,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }));
         break;
       case "REMOVE_ITEM":
-        sendResponse(await setState(state => ({ items: state.items.filter(item => item.id !== msg.id) })));
+        sendResponse(await setState(state => {
+          const items = state.items.filter(item => item.id !== msg.id);
+          return { items, downloads: pruneDownloadsFor(state.downloads, items.map(it => it.id)) };
+        }));
         break;
       case "CLEAR_COMPLETED":
-        sendResponse(await setState(state => ({ items: state.items.filter(item => item.status !== "done") })));
+        sendResponse(await setState(state => {
+          const items = state.items.filter(item => item.status !== "done");
+          return { items, downloads: pruneDownloadsFor(state.downloads, items.map(it => it.id)) };
+        }));
         break;
       case "RETRY_FAILED":
         // Đưa các mục Lỗi/Cần kiểm tra về Chờ để gửi lại; giữ nguyên orderIndex
@@ -777,7 +801,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         queueEpoch++;
         wakeQueue();
         await debugInput.detach();
-        sendResponse(await setState({ items: [], running: false, paused: false, pauseReason: "" }));
+        sendResponse(await setState({ items: [], downloads: {}, running: false, paused: false, pauseReason: "" }));
         break;
       default:
         sendResponse(null);

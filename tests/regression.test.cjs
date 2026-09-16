@@ -314,6 +314,41 @@ test('failed initiation keeps the failed URL and still downloads remaining image
   assert.equal(failed.error, 'NETWORK_FAILED');
 });
 
+test('removing an item also prunes its download records', async () => {
+  const b = await background({
+    items: [{ id: 'a', text: 'one', status: 'done', orderIndex: 1 }, { id: 'b', text: 'two', status: 'pending', orderIndex: 2 }],
+    downloads: { 101: { requestId: 'a', status: 'complete' }, 102: { requestId: 'b', status: 'complete' } },
+  });
+  await b.message({ type: 'REMOVE_ITEM', id: 'a' });
+  assert.deepEqual(Object.keys(b.state().downloads), ['102']);
+});
+
+test('clearing completed items prunes only their own download records', async () => {
+  const b = await background({
+    items: [{ id: 'a', text: 'one', status: 'done', orderIndex: 1 }, { id: 'b', text: 'two', status: 'pending', orderIndex: 2 }],
+    downloads: { 101: { requestId: 'a', status: 'complete' }, 102: { requestId: 'b', status: 'complete' } },
+  });
+  await b.message({ type: 'CLEAR_COMPLETED' });
+  assert.deepEqual(Object.keys(b.state().downloads), ['102']);
+});
+
+test('clearing the queue wipes every download record instead of leaking them forever', async () => {
+  const b = await background({
+    items: [{ id: 'a', text: 'one', status: 'done', orderIndex: 1 }],
+    downloads: { 101: { requestId: 'a', status: 'complete' } },
+  });
+  await b.message({ type: 'CLEAR' });
+  assert.deepEqual(b.state().downloads, {});
+});
+
+test('startup prunes download records orphaned by removals from before this fix existed', async () => {
+  const b = await background({
+    items: [{ id: 'b', text: 'two', status: 'done', orderIndex: 2 }],
+    downloads: { 101: { requestId: 'a', status: 'complete' }, 102: { requestId: 'b', status: 'complete' } },
+  });
+  assert.deepEqual(Object.keys(b.state().downloads), ['102']);
+});
+
 test('interrupted registration is reconciled with actual Chrome download history', async () => {
   const b = await background();
   const record = { requestId: 'one', url: 'https://cdn.midjourney.com/a/0_0.png', filename: 'one_test_1.png', status: 'starting', startedAt: Date.now() };
