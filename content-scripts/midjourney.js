@@ -236,7 +236,14 @@ function gridIsFullyLoaded(grid) {
 
   return Array.from(imgs).every((img) => {
     const src = img.src || "";
-    return src.startsWith(MJ_CDN_PREFIX) && img.complete && img.naturalWidth > 0;
+    // Không đòi img.complete (trình duyệt tải/decode xong TRONG TAB) — tải
+    // file thật dùng chrome.downloads.download() gọi trực tiếp URL, không
+    // phụ thuộc ảnh đã hiện đủ trong tab hay chưa. Trước đây bắt MỌI ảnh
+    // trong lưới phải img.complete nên 1 ảnh mạng chậm/tab đang ẩn (bị trì
+    // hoãn tải) chặn luôn báo "xong" cho cả lưới, dù server đã tạo xong và
+    // gán URL thật cho tất cả. Vẫn giữ naturalWidth > 0 — có sớm hơn nhiều so
+    // với complete với ảnh tải chậm, và vẫn loại được ảnh hỏng/rỗng.
+    return src.startsWith(MJ_CDN_PREFIX) && img.naturalWidth > 0;
   });
 }
 

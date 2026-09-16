@@ -235,12 +235,44 @@ chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
   return true;
 });
 
+const MAX_DOWNLOAD_RESUME_ATTEMPTS = 3;
+
 async function recordDownloadStatus(downloadId) {
   const state = await getState();
   const saved = state.downloads[downloadId];
-  if (!saved || saved.status !== "downloading") return;
+  // "complete" là trạng thái chấm dứt thật duy nhất. Trước đây guard này chỉ
+  // xử lý khi status hiện tại còn là "downloading" — nên ngay khi mạng
+  // chậm/chập chờn khiến Chrome báo "interrupted" một lần, bản ghi bị đóng
+  // băng: dù download sau đó (tự Chrome hay do resume() dưới đây) tải xong
+  // thật, sự kiện onChanged tiếp theo cũng bị bỏ qua vì saved.status không
+  // còn là "downloading" nữa. Ảnh nặng/mạng chậm dễ gặp interrupted tạm thời
+  // hơn ảnh nhỏ, nên đây là nguyên nhân trực tiếp khiến "ảnh chậm không tải
+  // về được" dù thực tế Chrome vẫn tải được.
+  if (!saved || saved.status === "complete") return;
   const [download] = await chrome.downloads.search({ id: Number(downloadId) });
-  if (download && download.state === "in_progress") return;
+  if (download && download.state === "in_progress") {
+    if (saved.status !== "downloading") {
+      await setState(current => {
+        const previous = current.downloads[downloadId];
+        if (!previous || previous.status === "complete") return {};
+        return { downloads: { ...current.downloads, [downloadId]: { ...previous, status: "downloading" } } };
+      });
+    }
+    return;
+  }
+  if (download?.state === "interrupted" && download.canResume && (saved.resumeAttempts || 0) < MAX_DOWNLOAD_RESUME_ATTEMPTS) {
+    // Chrome không tự nối lại các lượt tải "interrupted" — phải tự gọi
+    // resume(). Thử trước khi chốt là lỗi, vì gián đoạn do mạng chậm/chập
+    // chờn thường resume được ngay.
+    await setState(current => {
+      const previous = current.downloads[downloadId];
+      if (!previous || previous.status === "complete") return {};
+      return { downloads: { ...current.downloads,
+        [downloadId]: { ...previous, resumeAttempts: (previous.resumeAttempts || 0) + 1 } } };
+    });
+    const resumed = await chrome.downloads.resume(Number(downloadId)).then(() => true).catch(() => false);
+    if (resumed) return;
+  }
   const status = download?.state === "complete" ? "complete" : "interrupted";
   const error = status === "complete" ? "" : (download?.error || "Không tìm thấy lượt tải trong Chrome.");
   // Đối chiếu với đường dẫn Chrome THỰC SỰ dùng để lưu — trước đây log chỉ
@@ -254,7 +286,7 @@ async function recordDownloadStatus(downloadId) {
   let changed = false;
   await setState(current => {
     const previous = current.downloads[downloadId];
-    if (!previous || previous.status !== "downloading") return {};
+    if (!previous || previous.status === "complete") return {};
     changed = true;
     return { downloads: { ...current.downloads, [downloadId]: { ...previous, status, error, actualPath } } };
   });
@@ -269,14 +301,28 @@ async function recordDownloadStatus(downloadId) {
   }
 }
 
-async function reconcileDownloadIntent(key, record) {
+async function findReconcileMatch(record) {
   const matches = (await chrome.downloads.search({ url: record.url })).filter(file => {
     const filename = (file.filename || "").replace(/\\/g, "/");
     return (filename === record.filename || filename.endsWith("/" + record.filename)) &&
       Date.parse(file.startTime) >= record.startedAt - 2000;
   });
-  if (matches.length === 1) {
-    const id = matches[0].id;
+  return matches.length === 1 ? matches[0] : null;
+}
+
+// Service worker khởi động lại đúng lúc đang await chrome.downloads.download()
+// (giữa lúc gọi và lúc Chrome trả downloadId) chỉ để lại bản ghi "starting".
+// Chrome cần một chút thời gian để lượt tải đó xuất hiện trong lịch sử tải —
+// tìm ngay lần đầu có thể ra 0 kết quả dù lượt tải (đặc biệt ảnh nặng/mạng
+// chậm) vẫn đang chạy tốt. Thử lại vài lần trước khi chốt là lỗi.
+async function reconcileDownloadIntent(key, record) {
+  let match = await findReconcileMatch(record);
+  for (let attempt = 0; !match && attempt < 3; attempt++) {
+    await sleep(1500);
+    match = await findReconcileMatch(record);
+  }
+  if (match) {
+    const id = match.id;
     await setState(state => {
       const downloads = { ...state.downloads };
       delete downloads[key];
@@ -316,8 +362,18 @@ async function downloadMedia(urls, promptText, subfolder, requestId, completedAt
         });
         filename = folder ? folder + "/" + name : name;
         // Save intent before asking Chrome, so suspension is visible, not silent.
-        await setState(state => ({ downloads: { ...state.downloads,
-          [key]: { requestId, sourceUrl, url: sourceUrl, filename, status: "starting", startedAt: Date.now() } } }));
+        // Xoá bản ghi "interrupted" cũ (nếu có) của chính URL này trước khi
+        // tạo lượt tải lại — nếu không, bản ghi lỗi cũ vẫn nằm lại song song
+        // với lượt tải mới, khiến side panel hiện lỗi cũ dù ảnh đang được tải
+        // lại/đã tải lại xong.
+        await setState(state => {
+          const downloads = { ...state.downloads };
+          for (const [k, d] of Object.entries(downloads)) {
+            if (d.requestId === requestId && d.sourceUrl === sourceUrl && d.status === "interrupted") delete downloads[k];
+          }
+          downloads[key] = { requestId, sourceUrl, url: sourceUrl, filename, status: "starting", startedAt: Date.now() };
+          return { downloads };
+        });
         pendingFilenames.set(sourceUrl, filename);
         const id = await chrome.downloads.download({ url: sourceUrl, filename, conflictAction: "uniquify" });
         if (typeof id !== "number") throw new Error("Chrome không trả về mã lượt tải.");

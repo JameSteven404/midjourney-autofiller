@@ -268,6 +268,51 @@ test('very fast completion is recovered by search after download registration', 
   assert.equal(b.state().downloads[1].status, 'complete');
 });
 
+test('a resumable interrupted download is resumed instead of given up on, and later completion is not ignored', async () => {
+  const b = await background();
+  await b.context.downloadMedia(['https://cdn.midjourney.com/a/0_0.webp'], 'test', '', 'one', Date.now(), 1, '{index}_{n}');
+  let resumeCalls = 0;
+  b.chrome.downloads.resume = async () => { resumeCalls++; };
+  Object.assign(b.files.get(1), { state: 'interrupted', canResume: true, error: 'NETWORK_TIMEOUT' });
+  await b.context.recordDownloadStatus(1);
+  assert.equal(resumeCalls, 1);
+  assert.equal(b.state().downloads[1].status, 'downloading');
+  Object.assign(b.files.get(1), { state: 'complete' });
+  await b.context.recordDownloadStatus(1);
+  assert.equal(b.state().downloads[1].status, 'complete');
+});
+
+test('retrying a failed image clears its old interrupted record instead of leaving it alongside the new attempt', async () => {
+  const b = await background();
+  const url = 'https://cdn.midjourney.com/a/0_0.png';
+  await b.context.setState({ downloads: { 99: { requestId: 'one', sourceUrl: url, url, filename: 'old.png', status: 'interrupted', error: 'NETWORK_FAILED' } } });
+  await b.context.downloadMedia([url], 'test', '', 'one', Date.now(), 1, '{index}_{n}');
+  const records = Object.values(b.state().downloads);
+  assert.equal(records.some(r => r.status === 'interrupted'), false);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].status, 'downloading');
+});
+
+test('reconcileDownloadIntent retries before giving up on a download not yet indexed by Chrome', async () => {
+  const b = await background();
+  b.context.sleep = async () => {};
+  const record = { requestId: 'one', url: 'https://cdn.midjourney.com/a/0_0.png', filename: 'one_test_1.png', status: 'starting', startedAt: Date.now() };
+  await b.context.setState({ downloads: { intent: record } });
+  let calls = 0;
+  const file = { id: 12, url: record.url, filename: 'C:/Downloads/' + record.filename, startTime: new Date().toISOString(), state: 'complete' };
+  // Chỉ đếm lượt search theo url (của reconcileDownloadIntent) — recordDownloadStatus
+  // gọi lại search theo id ngay sau khi khớp, không liên quan tới số lần thử ở đây.
+  b.chrome.downloads.search = async (query) => {
+    if (!query.url) return [file];
+    calls++;
+    return calls < 3 ? [] : [file];
+  };
+  await b.context.reconcileDownloadIntent('intent', record);
+  assert.equal(calls, 3);
+  assert.equal(b.state().downloads.intent, undefined);
+  assert.equal(b.state().downloads[12].status, 'complete');
+});
+
 test('continuous mode waits for the in-flight limit before submitting', async () => {
   const b = await background({ tabId: 7, continuousMode: true, maxInFlight: 1, items: [
     { id: 'one', text: 'first', status: 'generating', tabId: 7 },

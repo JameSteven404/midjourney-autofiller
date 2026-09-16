@@ -272,7 +272,11 @@ function renderState(state) {
         error.textContent = errors.join(" • ");
         details.appendChild(error);
       }
-      if (completed < item.mediaUrls.length && downloading.length === 0) {
+      // Trước đây khoá nút này bất cứ khi nào có BẤT KỲ ảnh nào trong item
+      // còn đang tải, dù ảnh khác đã lỗi (interrupted) có thể tải lại ngay —
+      // tính đúng số ảnh còn thiếu thật (chưa xong và chưa đang tải) thay vì
+      // chỉ hỏi "có ảnh nào đang tải hay không".
+      if (item.mediaUrls.length - completed - downloading.length > 0) {
         const retry = document.createElement("button");
         retry.className = "ghost small";
         retry.textContent = "Tải ảnh còn thiếu";

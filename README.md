@@ -1,4 +1,16 @@
-# Midjourney Prompt Auto-Filler 1.4.4
+# Midjourney Prompt Auto-Filler 1.4.5
+
+## 1.4.5 (16/09/2026) — ảnh mạng chậm không tải về được, trạng thái hiển thị sai
+
+Người dùng báo trực tiếp: ảnh tải chậm hay bị kẹt/không tải về được, và thanh trạng thái vẫn hiển thị sai. Chạy audit song song 3 hướng (độ tin cậy tải file, độ chính xác trạng thái job, cách side panel vẽ UI) rồi kiểm chứng chéo từng phát hiện trên đúng mã nguồn — xác nhận 7/7, không cái nào bị bác bỏ. Sửa 5 lỗi:
+
+- **`recordDownloadStatus` đóng băng vĩnh viễn ở lần "interrupted" đầu tiên**: trước đây chỉ xử lý tiếp khi trạng thái hiện tại còn là "downloading" — mạng chậm/chập chờn khiến Chrome báo gián đoạn tạm thời một lần là bản ghi đóng băng mãi, dù download sau đó tải xong thật cũng không được ghi nhận lại. Giờ chỉ coi "complete" là chấm dứt thật; gặp "interrupted" mà `canResume` thì tự gọi `chrome.downloads.resume()` (tối đa 3 lần) trước khi chốt là lỗi — Chrome không tự nối lại các lượt bị gián đoạn, phải tự gọi resume.
+- **`gridIsFullyLoaded()` bắt buộc MỌI ảnh trong 1 lưới phải `img.complete` mới coi job xong**: 1 ảnh tải chậm trong tab (mạng chậm, hoặc tab bị ẩn/ảo hoá) chặn luôn báo "Xong" cho cả lưới dù 3 ảnh khác đã xong — mà việc tải file qua `chrome.downloads.download()` không phụ thuộc ảnh đã hiện trong tab hay chưa. Bỏ yêu cầu `.complete`, giữ `naturalWidth > 0` (có sớm hơn nhiều, vẫn loại được ảnh hỏng/rỗng).
+- **`reconcileDownloadIntent()` bỏ cuộc ngay lần tìm đầu tiên** nếu service worker khởi động lại đúng lúc đang gọi tải — giờ thử lại tối đa 3 lần (cách nhau 1.5s) trước khi chốt "chưa đối chiếu được", vì Chrome cần chút thời gian để lượt tải (đặc biệt ảnh nặng/mạng chậm) xuất hiện trong lịch sử tải.
+- **Bản ghi lỗi cũ không bị xoá khi tải lại ảnh thành công**: `downloadMedia()` giờ xoá mọi bản ghi "interrupted" cùng ảnh trước khi tạo lượt tải lại, để side panel không hiện lỗi cũ chồng lên ảnh đã sửa xong.
+- **Nút "Tải ảnh còn thiếu" bị khoá bởi bất kỳ ảnh nào khác trong cùng item còn đang tải**: sidepanel.js trước tính "còn thiếu" bằng "không có ảnh nào đang tải", nên 1 ảnh đang tải chậm khoá luôn nút retry của ảnh khác đã lỗi. Giờ tính đúng số ảnh còn thiếu thật (`tổng - đã xong - đang tải`).
+
+Thêm 4 kiểm thử cho 4 lỗi phía background.js; lỗi nút retry ở sidepanel.js kiểm chứng bằng đọc code (chưa có DOM test harness cho sidepanel.js trong repo). Một phát hiện phụ (nháy "0/N" trong khoảnh khắc ngắn ngay lúc job vừa xong, tự sửa ở broadcast kế tiếp) không sửa vì tác động không đáng kể so với rủi ro đổi thêm luồng ghi state.
 
 ## 1.4.4 (16/09/2026) — Midjourney chuẩn hoá en dash "–" thành gạch ngang thường khi hiển thị
 
