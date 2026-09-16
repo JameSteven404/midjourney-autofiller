@@ -370,7 +370,13 @@ function diagnoseNoMatch(text, snapshots) {
   }
   const target = normalizePromptText(text);
   if (!snapshots.some((s) => promptMatchScore(target, s.text) > 0)) {
-    return `Tìm thấy ${snapshots.length} lưới kết quả (đọc được prompt ở ${withText}) nhưng không cái nào khớp đúng nội dung prompt đã gửi — trang có thể hiển thị prompt khác với nội dung đã gửi.`;
+    // Đợt chẩn đoán trước chỉ báo "không khớp" nhưng không cho thấy khớp
+    // SAI ở đâu — thử sửa theo giả thuyết (cắt tham số) vẫn không đủ, nên
+    // giờ in kèm mẫu văn bản thật (cắt gọn) để đối chiếu trực tiếp thay vì
+    // đoán tiếp giả thuyết khác.
+    const sample = snapshots.filter((s) => s.text).slice(0, 3)
+      .map((s, i) => `[${i}] "${s.text.slice(0, 160)}"`).join(" | ");
+    return `Tìm thấy ${snapshots.length} lưới kết quả (đọc được prompt ở ${withText}) nhưng không cái nào khớp — ĐÃ GỬI (đầu): "${target.slice(0, 160)}" — TRANG ĐỌC ĐƯỢC: ${sample}`;
   }
   return "Đã khớp đúng lưới kết quả nhưng ảnh bên trong chưa được tool coi là tải xong hết (thiếu src CDN Midjourney, hoặc naturalWidth = 0) — có thể do mạng chậm hoặc Midjourney đổi cách hiển thị ảnh trong lưới.";
 }
