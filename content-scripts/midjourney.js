@@ -96,6 +96,12 @@ function normalizePromptText(text) {
     .replace(/\s+/g, " ")
     .replace(/[“”]/g, '"')
     .replace(/[‘’]/g, "'")
+    // Midjourney chuẩn hoá gạch ngang dài (–/—, hay gặp trong khoảng số như
+    // "60000–40000" do Excel/Word tự đổi từ "-") thành gạch ngang thường khi
+    // hiển thị lại trong lưới kết quả (thấy trực tiếp qua ảnh chụp trang
+    // thật) — quan sát được ở giữa câu, không phải chỉ ở đuôi tham số, nên
+    // stripPromptParams không xử lý được; phải chuẩn hoá luôn cả 2 phía.
+    .replace(/[–—]/g, "-")
     .trim()
     .toLowerCase();
 }

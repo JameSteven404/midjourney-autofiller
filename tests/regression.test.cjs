@@ -145,6 +145,13 @@ test('normalizePromptText strips the --ar/--seed parameter tail before comparing
   assert.equal(submitted, displayed);
 });
 
+test('normalizePromptText matches an en/em dash mid-sentence against a plain hyphen (Midjourney redisplay)', () => {
+  const { context: c } = content();
+  const submitted = c.normalizePromptText('approximately 60000–40000 years ago: a caveman --ar 16:9 --seed 1');
+  const displayedAsHyphen = c.normalizePromptText('approximately 60000-40000 years ago: a caveman');
+  assert.equal(submitted, displayedAsHyphen);
+});
+
 test('a stalled job is warned about once after 90s, not spammed every tick', () => {
   const { context: c, messages } = content();
   c.findErrorBanner = () => null;

@@ -1,4 +1,15 @@
-# Midjourney Prompt Auto-Filler 1.4.3
+# Midjourney Prompt Auto-Filler 1.4.4
+
+## 1.4.4 (16/09/2026) — Midjourney chuẩn hoá en dash "–" thành gạch ngang thường khi hiển thị
+
+Bản 1.4.3 (cắt `--ar/--seed`) vẫn không đủ — báo cáo thật tiếp theo vẫn "không cái nào khớp". Người dùng gửi ảnh chụp trực tiếp trang Midjourney thật: khối text hiển thị đúng `"approximately 60000-40000 years ago"` bằng gạch ngang thường, còn prompt đã gửi dùng **en dash "–"** (`60000–40000`, U+2013 — SOP hay có do Excel/Word tự đổi `-` thành gạch ngang dài). Ảnh cũng xác nhận lại `ar 16:9`/`seed 52000101`/`hd` hiện thành 3 chip riêng, đúng như đã sửa ở 1.4.3.
+
+Khác với đuôi tham số (nằm cuối câu), chỗ lệch này nằm **giữa câu** — `stripPromptParams` không đụng tới, nên khớp nguyên văn/khớp phần đầu đều thất bại ngay từ điểm đó, dù phần còn lại của câu giống nhau tuyệt đối.
+
+- `normalizePromptText` giờ chuẩn hoá thêm en dash/em dash (`–`/`—`) thành gạch ngang thường, áp dụng cho cả 2 phía (prompt đã gửi và text đọc từ trang) — cùng logic đã dùng cho việc chuẩn hoá dấu ngoặc kép kiểu chữ.
+- Log chẩn đoán "không khớp" (thêm ở đợt trước) giờ in kèm 160 ký tự đầu của prompt đã gửi và tối đa 3 mẫu văn bản trang đọc được — nhờ đó lần này xác định trực tiếp được điểm lệch qua ảnh chụp, không cần đoán thêm.
+- Thêm kiểm thử: en dash giữa câu khớp đúng với gạch ngang thường tương ứng trên trang.
+- Đã tự kiểm chứng lại bằng đúng prompt thật (852 ký tự, seed 52000101) từ báo cáo của người dùng, mô phỏng đúng tình huống thấy trong ảnh chụp: khớp điểm 1000/1000.
 
 ## 1.4.3 (16/09/2026) — tìm ra nguyên nhân thật: so khớp prompt dài kèm --ar/--seed
 
