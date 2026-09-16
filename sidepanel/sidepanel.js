@@ -106,6 +106,14 @@ const STATUS_LABEL = {
 let lastState = null;
 let lastQueueRenderKey = "";
 let lastLogsRenderKey = "";
+// Giữ lại đúng phần tử <li> của mỗi item giữa các lần render (khớp theo
+// item.id) — trước đây mỗi lần state.items/state.downloads đổi (rất thường
+// xuyên lúc chạy: mỗi lần đổi trạng thái, mỗi ảnh bắt đầu/xong tải) code xoá
+// sạch cả <ul> rồi dựng lại từ đầu, khiến animation "xuất hiện" của .queue-list
+// li (itemIn, xem sidepanel.css) replay cho toàn bộ danh sách mỗi lần — đó là
+// hiện tượng nhấp nháy. Giờ chỉ tạo <li> mới cho item thật sự mới, cập nhật
+// nội dung tại chỗ cho item đã có, và chỉ xoá <li> của item đã rời hàng đợi.
+const queueItemEls = new Map();
 
 // Xem trước tên file đúng như background.js sẽ tạo, để chỉnh mẫu thấy ngay
 // kết quả thay vì phải chạy thử rồi mới biết sai.
@@ -146,6 +154,111 @@ function renderTiming() {
     average ? `Thời gian gửi trung bình: ${average}s (${samples.length} prompt)` : ""].filter(Boolean).join(" • ");
 }
 setInterval(renderTiming, 1000);
+
+// Dựng lại nội dung của đúng 1 <li> có sẵn (không tạo mới) — tách riêng khỏi
+// renderQueueList để giữ nguyên phần tử <li> giữa các lần render, tránh
+// replay animation "xuất hiện" (xem ghi chú tại khai báo queueItemEls).
+function buildQueueItemBody(li, item, state) {
+  li.innerHTML = "";
+
+  // Số thứ tự hiển thị đúng bằng số sẽ dùng trong tên file, để đối chiếu
+  // nhanh giữa hàng đợi, dòng Excel và file trong thư mục tải về.
+  const order = document.createElement("span");
+  order.className = "order-badge";
+  order.textContent = String(item.orderIndex || 0).padStart(3, "0");
+  order.title = "Số thứ tự dùng trong tên file";
+
+  const badge = document.createElement("span");
+  badge.className = `badge ${item.status}`;
+  badge.textContent = STATUS_LABEL[item.status] || item.status;
+
+  const text = document.createElement("span");
+  text.className = "text";
+  text.title = item.text + (item.note ? `\n\n${item.note}` : "");
+  text.textContent = item.text;
+
+  const removeBtn = document.createElement("span");
+  removeBtn.className = "removeBtn";
+  removeBtn.textContent = "✕";
+  removeBtn.title = "Xoá khỏi hàng đợi";
+  removeBtn.addEventListener("click", async () => {
+    renderState(await sendMsg({ type: "REMOVE_ITEM", id: item.id }));
+  });
+
+  const details = document.createElement("div");
+  details.className = "queue-item-details";
+  details.appendChild(text);
+  if (item.note) {
+    const note = document.createElement("small");
+    note.textContent = item.note;
+    details.appendChild(note);
+  }
+  const records = Object.values(state.downloads || {}).filter(record => record.requestId === item.id);
+  if (item.mediaUrls?.length) {
+    const completed = new Set(records.filter(r => r.status === "complete").map(r => r.sourceUrl || r.url)).size;
+    const downloading = records.filter(r => ["downloading", "starting"].includes(r.status));
+    const summary = document.createElement("small");
+    summary.textContent = `Đã tải: ${completed}/${item.mediaUrls.length}` + (downloading.length ? ` • Đang tải: ${downloading.length}` : "");
+    details.appendChild(summary);
+    const errors = [...new Set(records.filter(r => r.status === "interrupted" && r.error).map(r => r.error))];
+    if (errors.length && completed < item.mediaUrls.length) {
+      const error = document.createElement("small");
+      error.textContent = errors.join(" • ");
+      details.appendChild(error);
+    }
+    // Trước đây khoá nút này bất cứ khi nào có BẤT KỲ ảnh nào trong item còn
+    // đang tải, dù ảnh khác đã lỗi (interrupted) có thể tải lại ngay — tính
+    // đúng số ảnh còn thiếu thật (chưa xong và chưa đang tải) thay vì chỉ
+    // hỏi "có ảnh nào đang tải hay không".
+    if (item.mediaUrls.length - completed - downloading.length > 0) {
+      const retry = document.createElement("button");
+      retry.className = "ghost small";
+      retry.textContent = "Tải ảnh còn thiếu";
+      retry.addEventListener("click", async () => {
+        retry.disabled = true;
+        renderState(await sendMsg({ type: "RETRY_DOWNLOAD", id: item.id }));
+      });
+      details.appendChild(retry);
+    }
+  }
+  if (item.status === "review") {
+    const checked = document.createElement("button");
+    checked.className = "ghost small";
+    checked.textContent = "Đã kiểm tra trên Midjourney — bỏ qua";
+    checked.addEventListener("click", async () => renderState(await sendMsg({ type: "CONFIRM_REVIEW", id: item.id })));
+    details.appendChild(checked);
+  }
+  li.appendChild(order);
+  li.appendChild(badge);
+  li.appendChild(details);
+  li.appendChild(removeBtn);
+}
+
+// Đối chiếu theo item.id: chỉ tạo <li> mới cho item thật sự mới, cập nhật nội
+// dung tại chỗ cho item đã có (không đụng tới phần tử DOM của nó), chỉ xoá
+// <li> của item đã rời hàng đợi, và chỉ di chuyển <li> nào thực sự sai vị trí.
+function renderQueueList(state) {
+  const seen = new Set();
+  let prevSibling = null;
+  for (const item of state.items) {
+    seen.add(item.id);
+    let li = queueItemEls.get(item.id);
+    if (!li) {
+      li = document.createElement("li");
+      queueItemEls.set(item.id, li);
+    }
+    buildQueueItemBody(li, item, state);
+    const expectedNext = prevSibling ? prevSibling.nextSibling : queueListEl.firstChild;
+    if (expectedNext !== li) queueListEl.insertBefore(li, expectedNext);
+    prevSibling = li;
+  }
+  for (const [id, li] of queueItemEls) {
+    if (!seen.has(id)) {
+      li.remove();
+      queueItemEls.delete(id);
+    }
+  }
+}
 
 function renderState(state) {
   if (!state) return;
@@ -222,84 +335,8 @@ function renderState(state) {
   emptyHintEl.classList.toggle("hidden", state.items.length > 0);
   const queueRenderKey = JSON.stringify([state.items, state.downloads]);
   if (queueRenderKey !== lastQueueRenderKey) {
-  lastQueueRenderKey = queueRenderKey;
-  queueListEl.innerHTML = "";
-  for (const item of state.items) {
-    const li = document.createElement("li");
-
-    // Số thứ tự hiển thị đúng bằng số sẽ dùng trong tên file, để đối chiếu
-    // nhanh giữa hàng đợi, dòng Excel và file trong thư mục tải về.
-    const order = document.createElement("span");
-    order.className = "order-badge";
-    order.textContent = String(item.orderIndex || 0).padStart(3, "0");
-    order.title = "Số thứ tự dùng trong tên file";
-
-    const badge = document.createElement("span");
-    badge.className = `badge ${item.status}`;
-    badge.textContent = STATUS_LABEL[item.status] || item.status;
-
-    const text = document.createElement("span");
-    text.className = "text";
-    text.title = item.text + (item.note ? `\n\n${item.note}` : "");
-    text.textContent = item.text;
-
-    const removeBtn = document.createElement("span");
-    removeBtn.className = "removeBtn";
-    removeBtn.textContent = "✕";
-    removeBtn.title = "Xoá khỏi hàng đợi";
-    removeBtn.addEventListener("click", async () => {
-      renderState(await sendMsg({ type: "REMOVE_ITEM", id: item.id }));
-    });
-
-    const details = document.createElement("div");
-    details.className = "queue-item-details";
-    details.appendChild(text);
-    if (item.note) {
-      const note = document.createElement("small");
-      note.textContent = item.note;
-      details.appendChild(note);
-    }
-    const records = Object.values(state.downloads || {}).filter(record => record.requestId === item.id);
-    if (item.mediaUrls?.length) {
-      const completed = new Set(records.filter(r => r.status === "complete").map(r => r.sourceUrl || r.url)).size;
-      const downloading = records.filter(r => ["downloading", "starting"].includes(r.status));
-      const summary = document.createElement("small");
-      summary.textContent = `Đã tải: ${completed}/${item.mediaUrls.length}` + (downloading.length ? ` • Đang tải: ${downloading.length}` : "");
-      details.appendChild(summary);
-      const errors = [...new Set(records.filter(r => r.status === "interrupted" && r.error).map(r => r.error))];
-      if (errors.length && completed < item.mediaUrls.length) {
-        const error = document.createElement("small");
-        error.textContent = errors.join(" • ");
-        details.appendChild(error);
-      }
-      // Trước đây khoá nút này bất cứ khi nào có BẤT KỲ ảnh nào trong item
-      // còn đang tải, dù ảnh khác đã lỗi (interrupted) có thể tải lại ngay —
-      // tính đúng số ảnh còn thiếu thật (chưa xong và chưa đang tải) thay vì
-      // chỉ hỏi "có ảnh nào đang tải hay không".
-      if (item.mediaUrls.length - completed - downloading.length > 0) {
-        const retry = document.createElement("button");
-        retry.className = "ghost small";
-        retry.textContent = "Tải ảnh còn thiếu";
-        retry.addEventListener("click", async () => {
-          retry.disabled = true;
-          renderState(await sendMsg({ type: "RETRY_DOWNLOAD", id: item.id }));
-        });
-        details.appendChild(retry);
-      }
-    }
-    if (item.status === "review") {
-      const checked = document.createElement("button");
-      checked.className = "ghost small";
-      checked.textContent = "Đã kiểm tra trên Midjourney — bỏ qua";
-      checked.addEventListener("click", async () => renderState(await sendMsg({ type: "CONFIRM_REVIEW", id: item.id })));
-      details.appendChild(checked);
-    }
-    li.appendChild(order);
-    li.appendChild(badge);
-    li.appendChild(details);
-    li.appendChild(removeBtn);
-    queueListEl.appendChild(li);
-  }
+    lastQueueRenderKey = queueRenderKey;
+    renderQueueList(state);
   }
 
   startBtn.disabled = state.running;

@@ -1,4 +1,12 @@
-# Midjourney Prompt Auto-Filler 1.4.5
+# Midjourney Prompt Auto-Filler 1.4.6
+
+## 1.4.6 (16/09/2026) — sửa nhấp nháy hàng đợi lúc gửi prompt/tải ảnh
+
+Side panel trước đây dựng lại **toàn bộ** danh sách hàng đợi (`queueList.innerHTML = ""` rồi tạo lại từng `<li>` từ đầu) mỗi khi `state.items`/`state.downloads` đổi — mà việc này xảy ra rất thường xuyên lúc chạy: mỗi lần đổi trạng thái item, mỗi ảnh bắt đầu/xong tải. `.queue-list li` trong sidepanel.css có animation "xuất hiện" (`itemIn`, so le theo thứ tự) chạy mỗi khi 1 `<li>` được chèn mới vào DOM — nên việc đập-đi-xây-lại cả danh sách khiến animation này replay cho **toàn bộ** hàng đợi ở mỗi lần cập nhật, đúng là hiện tượng nhấp nháy.
+
+- `renderQueueList()` (mới) giờ đối chiếu theo `item.id`: chỉ tạo `<li>` mới cho item thật sự mới thêm vào hàng đợi, cập nhật nội dung tại chỗ cho item đã có (giữ nguyên phần tử DOM của nó), chỉ xoá `<li>` của item đã rời hàng đợi, và chỉ di chuyển `<li>` nào thực sự sai vị trí — không đụng tới các item không đổi.
+- Toàn bộ logic dựng nội dung 1 dòng (số thứ tự, badge trạng thái, text, tiến độ tải, nút retry, nút xác nhận review...) giữ nguyên như cũ, chỉ tách vào `buildQueueItemBody(li, item, state)` để tái sử dụng cho cả tạo mới và cập nhật.
+- Thêm bộ test riêng cho sidepanel.js (DOM giả tối thiểu, chưa có trước đây trong repo): xác nhận re-render giữ đúng tham chiếu `<li>` cũ, xoá đúng 1 item không đụng các item khác, thêm item mới không đụng item cũ.
 
 ## 1.4.5 (16/09/2026) — ảnh mạng chậm không tải về được, trạng thái hiển thị sai
 

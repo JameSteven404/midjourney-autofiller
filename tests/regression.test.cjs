@@ -19,6 +19,79 @@ function content() {
   return { context, messages };
 }
 
+// DOM giả tối thiểu — chỉ đủ để sidepanel.js chạy được và để kiểm tra cây
+// <li> thật sự dựng ra, không phải một thư viện DOM đầy đủ.
+function fakeElement(tag) {
+  const el = {
+    tagName: String(tag || 'div').toUpperCase(), childNodes: [], parentNode: null,
+    style: {}, dataset: {}, value: '', checked: false, textContent: '', title: '',
+    disabled: false, className: '', id: '', _html: '',
+    classList: {
+      _set: new Set(),
+      toggle(cls, force) { const on = force !== undefined ? force : !this._set.has(cls); this._set[on ? 'add' : 'delete'](cls); return on; },
+      add(...cls) { cls.forEach(c => this._set.add(c)); },
+      remove(...cls) { cls.forEach(c => this._set.delete(c)); },
+      contains(cls) { return this._set.has(cls); },
+    },
+    get firstChild() { return this.childNodes[0] || null; },
+    get nextSibling() {
+      if (!this.parentNode) return null;
+      return this.parentNode.childNodes[this.parentNode.childNodes.indexOf(this) + 1] || null;
+    },
+    appendChild(child) {
+      if (child.parentNode) child.parentNode.removeChild(child);
+      this.childNodes.push(child); child.parentNode = this; return child;
+    },
+    insertBefore(node, ref) {
+      if (node.parentNode) node.parentNode.removeChild(node);
+      const idx = ref ? this.childNodes.indexOf(ref) : -1;
+      if (ref && idx === -1) throw new Error('refNode not a child of this node');
+      if (ref) this.childNodes.splice(idx, 0, node); else this.childNodes.push(node);
+      node.parentNode = this; return node;
+    },
+    removeChild(child) {
+      const idx = this.childNodes.indexOf(child);
+      if (idx !== -1) this.childNodes.splice(idx, 1);
+      child.parentNode = null; return child;
+    },
+    remove() { if (this.parentNode) this.parentNode.removeChild(this); },
+    addEventListener() {},
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+    set innerHTML(v) { this.childNodes.forEach(c => { c.parentNode = null; }); this.childNodes = []; this._html = v; },
+    get innerHTML() { return this._html; },
+  };
+  return el;
+}
+
+function sidepanel(initialState) {
+  const elementsById = new Map();
+  const messages = [];
+  let stored = { items: [], logs: [], downloads: {}, inputMode: 'dom', delayMinSeconds: 8, delayMaxSeconds: 20,
+    maxInFlight: 1, defaultSettings: {}, ...initialState };
+  const documentMock = {
+    getElementById(id) {
+      if (!elementsById.has(id)) { const el = fakeElement('div'); el.id = id; elementsById.set(id, el); }
+      return elementsById.get(id);
+    },
+    createElement(tag) { return fakeElement(tag); },
+    querySelectorAll() { return []; },
+  };
+  const chrome = {
+    runtime: {
+      onMessage: event(),
+      sendMessage(message, cb) { messages.push(message); cb?.(message.type === 'GET_STATE' ? structuredClone(stored) : structuredClone(stored)); },
+      lastError: undefined,
+      getManifest() { return { version: 'test' }; },
+    },
+  };
+  const context = vm.createContext({ console, document: documentMock, chrome, getComputedStyle: () => ({ maxHeight: '420px' }),
+    setInterval: () => 1, clearInterval() {}, setTimeout, clearTimeout, URL: { createObjectURL: () => '', revokeObjectURL() {} } });
+  vm.runInContext(source('sidepanel/sidepanel.js'), context);
+  return { context, elementsById, chrome, messages, state: () => stored,
+    setState(patch) { stored = { ...stored, ...patch }; return structuredClone(stored); } };
+}
+
 async function background(initial = {}) {
   let stored = { items: [], logs: [], downloads: {}, inputMode: 'dom', ...initial };
   const messages = [], calls = [], files = new Map();
@@ -571,4 +644,60 @@ test('composer is reselected after settings rerender the input', async () => {
   c.waitForPromptToClear = async () => true;
   assert.equal((await c.fillAndSubmit('test', 'one', {})).ok, true);
   assert.equal(filled, fresh);
+});
+
+test('queue list keeps the same <li> element across renders instead of rebuilding it (no flicker)', () => {
+  const s = sidepanel();
+  const state = { items: [
+    { id: 'a', text: 'first prompt', status: 'pending', orderIndex: 1 },
+    { id: 'b', text: 'second prompt', status: 'generating', orderIndex: 2 },
+  ], logs: [], downloads: {}, inputMode: 'dom', delayMinSeconds: 8, delayMaxSeconds: 20, maxInFlight: 1, defaultSettings: {} };
+  s.context.renderState(state);
+  const queueListEl = s.elementsById.get('queueList');
+  assert.equal(queueListEl.childNodes.length, 2);
+  const [liA, liB] = queueListEl.childNodes;
+
+  // b changes status (as it would when a prompt finishes generating); a is untouched.
+  const nextState = { ...state, items: [state.items[0], { ...state.items[1], status: 'done', mediaUrls: [] }] };
+  s.context.renderState(nextState);
+  assert.equal(queueListEl.childNodes.length, 2);
+  assert.equal(queueListEl.childNodes[0], liA, 'unchanged item keeps its DOM element');
+  assert.equal(queueListEl.childNodes[1], liB, 'changed item keeps its DOM element (content updated in place)');
+});
+
+test('removing an item removes only its own <li>, keeping the others element identity and order', () => {
+  const s = sidepanel();
+  const state = { items: [
+    { id: 'a', text: 'first', status: 'pending', orderIndex: 1 },
+    { id: 'b', text: 'second', status: 'pending', orderIndex: 2 },
+    { id: 'c', text: 'third', status: 'pending', orderIndex: 3 },
+  ], logs: [], downloads: {}, inputMode: 'dom', delayMinSeconds: 8, delayMaxSeconds: 20, maxInFlight: 1, defaultSettings: {} };
+  s.context.renderState(state);
+  const queueListEl = s.elementsById.get('queueList');
+  const [liA, , liC] = queueListEl.childNodes;
+
+  const nextState = { ...state, items: [state.items[0], state.items[2]] };
+  s.context.renderState(nextState);
+  assert.equal(queueListEl.childNodes.length, 2);
+  assert.equal(queueListEl.childNodes[0], liA);
+  assert.equal(queueListEl.childNodes[1], liC);
+});
+
+test('appending a new item creates its own new <li> without touching existing ones', () => {
+  const s = sidepanel();
+  const state = { items: [
+    { id: 'a', text: 'first', status: 'pending', orderIndex: 1 },
+    { id: 'b', text: 'second', status: 'pending', orderIndex: 2 },
+  ], logs: [], downloads: {}, inputMode: 'dom', delayMinSeconds: 8, delayMaxSeconds: 20, maxInFlight: 1, defaultSettings: {} };
+  s.context.renderState(state);
+  const queueListEl = s.elementsById.get('queueList');
+  const [liA, liB] = queueListEl.childNodes;
+
+  const nextState = { ...state, items: [...state.items, { id: 'c', text: 'third', status: 'pending', orderIndex: 3 }] };
+  s.context.renderState(nextState);
+  assert.equal(queueListEl.childNodes.length, 3);
+  assert.equal(queueListEl.childNodes[0], liA);
+  assert.equal(queueListEl.childNodes[1], liB);
+  assert.notEqual(queueListEl.childNodes[2], liA);
+  assert.notEqual(queueListEl.childNodes[2], liB);
 });
