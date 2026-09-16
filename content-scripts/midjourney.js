@@ -5,6 +5,16 @@ const SUBMIT_CLEAR_TIMEOUT_MS = 5000;
 const SUBMIT_CLEAR_POLL_MS = 120;
 const WATCHER_INTERVAL_MS = 4000;
 const JOB_TIMEOUT_MS = 30 * 60 * 1000;
+// Midjourney không thể tạo xong ảnh trong vài giây — một job "xong" gần như
+// ngay sau khi gửi gần chắc chắn là khớp nhầm (vd. lưới cũ, ảnh placeholder
+// mờ trước khi ảnh thật load xong). Chặn dưới này để hàng đợi không tưởng
+// job đã xong quá sớm rồi gửi dồn dập, vượt hạn mức job đồng thời thật của
+// tài khoản dù "Prompt đồng thời" đã đặt thấp.
+const MIN_JOB_DURATION_MS = 8000;
+// Yêu cầu cùng 1 lưới khớp ổn định qua ít nhất 2 lần kiểm tra cách nhau
+// khoảng này, phòng trường hợp DOM đổi ảnh xem trước ngay sau khi khớp lần
+// đầu (vd. ảnh mờ tạm thời được thay bằng ảnh thật, đổi luôn key của lưới).
+const CONFIRM_STABLE_MS = 1500;
 const MJ_CDN_PREFIX = "https://cdn.midjourney.com/";
 const SEND_ICON_PATH_PREFIX = "M3.82715 4.39551";
 
@@ -317,16 +327,28 @@ function checkPendingJobs() {
 
   for (const [requestId, job] of Array.from(pendingJobs.entries())) {
     if (job.reporting) continue;
-    const grid = findGridForText(job.text, job, snapshots);
-    if (grid && gridIsFullyLoaded(grid)) {
-      const key = gridKey(grid);
-      claimedGridKeys.add(key);
-      job.reporting = true;
-      reportJobDone(requestId, grid).then(() => pendingJobs.delete(requestId)).catch(() => {
-        job.reporting = false;
-        claimedGridKeys.delete(key);
-      });
-      continue;
+    // Không chấp nhận "xong" quá sớm — thời gian tạo ảnh thật của Midjourney
+    // luôn ít nhất vài giây; xác nhận sớm hơn gần chắc là khớp nhầm.
+    if (now - job.startedAt >= MIN_JOB_DURATION_MS) {
+      const grid = findGridForText(job.text, job, snapshots);
+      if (grid && gridIsFullyLoaded(grid)) {
+        const key = gridKey(grid);
+        if (job.confirmingKey !== key) {
+          // Lưới khớp lần đầu (hoặc đổi so với lần trước) — chỉ bắt đầu đếm
+          // thời gian ổn định, chưa claim/báo xong ngay.
+          job.confirmingKey = key;
+          job.confirmingSince = now;
+        } else if (now - job.confirmingSince >= CONFIRM_STABLE_MS) {
+          claimedGridKeys.add(key);
+          job.reporting = true;
+          reportJobDone(requestId, grid).then(() => pendingJobs.delete(requestId)).catch(() => {
+            job.reporting = false;
+            claimedGridKeys.delete(key);
+          });
+        }
+        continue;
+      }
+      job.confirmingKey = null;
     }
 
     if (now - job.startedAt > JOB_TIMEOUT_MS) {
@@ -507,8 +529,11 @@ function getSelectedOptionInGroup(labelText) {
 }
 
 function getSelectedPreset(labels) {
+  // Nút vẫn còn trong DOM (kèm class đã chọn) ngay cả khi bảng cài đặt đã
+  // đóng — Midjourney chỉ ẩn đi (display:none ở tổ tiên) chứ không gỡ khỏi
+  // DOM. Phải lọc theo hiển thị thật thì mới biết bảng còn mở hay không.
   const btn = Array.from(document.querySelectorAll("button")).find(
-    (b) => labels.includes((b.innerText || "").trim()) && isOptionSelected(b)
+    (b) => labels.includes((b.innerText || "").trim()) && isOptionSelected(b) && isElementVisible(b)
   );
   return btn ? btn.innerText.trim() : null;
 }
@@ -600,7 +625,18 @@ async function ensureDefaultSettings(config) {
   await waitUntil(() => getSelectedPreset(["Portrait", "Square", "Landscape"]) != null, 1200, 50);
   const notes = [];
   await verifyAndRetrySettings(config, notes);
-  if (submissionContext?.inputMode === "debugger") await debugAction("escape");
+  if (submissionContext?.inputMode === "debugger") {
+    // Escape không đóng được bảng cài đặt thật của Midjourney (đã kiểm chứng
+    // trực tiếp) — chỉ bấm ra ngoài mới đóng. Thử vài lần vì panel có thể
+    // chưa kịp gắn listener ngay sau lần click cuối cùng để chỉnh cài đặt.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await debugAction("clickOutside").catch(() => {});
+      if (await waitUntil(() => getSelectedPreset(["Portrait", "Square", "Landscape"]) == null, 500, 50)) break;
+    }
+    if (getSelectedPreset(["Portrait", "Square", "Landscape"]) != null) {
+      notes.push("Không đóng được bảng cài đặt sau khi áp dụng.");
+    }
+  }
   if (notes.length) return { ok: false, note: notes.join("; ") };
   lastAppliedSettingsKey = key;
   return { ok: true };

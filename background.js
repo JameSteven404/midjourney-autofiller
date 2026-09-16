@@ -24,6 +24,15 @@ const DEFAULT_STATE = {
   tabId: null,
   autoDownload: false,
   downloadSubfolder: "midjourney-output",
+  // Tên file theo SOP: {index} = số thứ tự prompt (đúng thứ tự dòng Excel),
+  // {seed} lấy từ tham số --seed trong prompt, {n} = số ảnh trong prompt đó
+  // → 001_52000101_1 … 001_52000101_4. Prompt không có --seed thì phần seed
+  // tự lược bỏ, còn lại 001_1.
+  filenameTemplate: "{index}_{seed}_{n}",
+  startIndex: 1,
+  // Ghi lại lần gần nhất trình duyệt tự đổi tên file so với yêu cầu, để side
+  // panel cảnh báo ngay thay vì để người dùng tự phát hiện qua Downloads.
+  lastFilenameMismatch: null,
   logs: [], // { ts, level: 'info'|'success'|'error', message }
   // Cấu hình mặc định áp trước khi gửi mỗi batch — field nào null/rỗng thì
   // giữ nguyên cài đặt hiện có trên Midjourney, không đổi gì cả.
@@ -100,6 +109,14 @@ function sanitizeFilename(text) {
   );
 }
 
+function timestampSlug(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return (
+    `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}` +
+    `-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`
+  );
+}
+
 // Keep CDN URLs durable across page reloads; preserve the source format.
 function mediaExtension(value) {
   const url = new URL(value);
@@ -117,6 +134,94 @@ function downloadFolder(value) {
     .map(part => part.replace(/[\x00-\x1f:*?"<>|]/g, "_").replace(/[. ]+$/g, "_")).join("/");
 }
 
+function pad3(value) {
+  return String(Math.max(0, Math.floor(Number(value) || 0))).padStart(3, "0");
+}
+
+function jobIdFromUrl(value) {
+  try {
+    return new URL(value).pathname.split("/").filter(Boolean)[0] || "";
+  } catch {
+    return "";
+  }
+}
+
+// Seed nằm ngay trong prompt dưới dạng tham số Midjourney "--seed 52000101"
+// (đúng SOP người dùng đang dùng), nên lấy thẳng từ prompt đã gửi — chính xác
+// tuyệt đối, không phụ thuộc DOM. Midjourney chỉ hiển thị chip seed khi prompt
+// có tham số này; nếu prompt không có thì không tồn tại seed để lấy.
+function seedFromPrompt(text) {
+  const m = String(text || "").match(/[-–—]{1,2}\s*seed\s+(\d{1,20})/i);
+  return m ? m[1] : "";
+}
+
+// Cắt phần tham số ("--ar 16:9 --seed ...") khỏi phần mô tả để {prompt} chỉ
+// còn nội dung thật, không lẫn cờ tham số. Chấp nhận 1-2 gạch ngang giống hệt
+// seedFromPrompt (Excel/Word có thể tự co "--" thành 1 gạch ngang dài "–") —
+// trước đây chỉ nhận đúng 2 ký tự nên khi bị tự động co lại, {prompt} không
+// cắt được dù {seed} vẫn lấy đúng, làm token {prompt} dính cả đuôi tham số.
+function promptWithoutParams(text) {
+  const s = String(text || "");
+  const at = s.search(/\s[-–—]{1,2}[a-z]/i);
+  return at > 0 ? s.slice(0, at) : s;
+}
+
+// {index} số thứ tự prompt · {n} số ảnh trong prompt · {seq} số chạy liên tục
+// · {seed} · {date} {time} {prompt} {job} {jobfull}. Biến rỗng (vd. prompt
+// không có seed) được thu gọn để không để lại dấu "_" thừa.
+function buildFilename(template, ctx) {
+  const at = new Date(ctx.completedAt || Date.now());
+  const jobId = sanitizeFilename(jobIdFromUrl(ctx.sourceUrl));
+  const tokens = {
+    index: pad3(ctx.index),
+    n: String(ctx.n),
+    seq: pad3(ctx.seq),
+    seed: seedFromPrompt(ctx.prompt),
+    date: timestampSlug(at).split("-")[0],
+    time: timestampSlug(at).split("-")[1],
+    prompt: sanitizeFilename(promptWithoutParams(ctx.prompt)),
+    job: jobId.slice(0, 12),
+    jobfull: jobId,
+  };
+  const base = String(template || "{index}_{n}")
+    .replace(/\{(index|n|seq|seed|date|time|prompt|jobfull|job)\}/g, (_, key) => tokens[key])
+    .replace(/[\\/:*?"<>|]+/g, "_")
+    .replace(/_{2,}/g, "_")
+    .replace(/^[_\-.]+|[_\-.]+$/g, "")
+    .trim()
+    .slice(0, 120)
+    .replace(/[._ ]+$/g, "") || `${tokens.index}_${tokens.n}`;
+  return base + "." + ctx.ext;
+}
+
+// `filename` truyền vào downloads.download() chỉ là GỢI Ý ban đầu; quyết định
+// cuối cùng thuộc về sự kiện onDeterminingFilename. Nếu extension khác (trình
+// quản lý tải…) đăng ký sự kiện này và gọi suggest() mặc định, gợi ý của mình
+// bị ghi đè — đúng hiện tượng đã đo được: yêu cầu "midjourney-output/001_1.webp"
+// nhưng Brave lưu "0_0_640_N.webp" ngay tại Downloads. Đăng ký ở đây để khẳng
+// định lại tên mình muốn ngay trong bước quyết định đó.
+const pendingFilenames = new Map(); // url -> filename mong muốn
+
+chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+  const wanted = pendingFilenames.get(item.url) || pendingFilenames.get(item.finalUrl);
+  if (wanted) {
+    pendingFilenames.delete(item.url);
+    pendingFilenames.delete(item.finalUrl);
+    suggest({ filename: wanted, conflictAction: "uniquify" });
+    return;
+  }
+  // Service worker có thể đã khởi động lại sau khi đặt lệnh tải — tra lại ý
+  // định đã lưu trong storage trước khi nhường quyền quyết định.
+  getState().then((state) => {
+    const rec = Object.values(state.downloads).find(
+      (d) => (d.url === item.url || d.sourceUrl === item.url) && ["starting", "downloading"].includes(d.status)
+    );
+    if (rec?.filename) suggest({ filename: rec.filename, conflictAction: "uniquify" });
+    else suggest();
+  }).catch(() => suggest());
+  return true;
+});
+
 async function recordDownloadStatus(downloadId) {
   const state = await getState();
   const saved = state.downloads[downloadId];
@@ -125,15 +230,30 @@ async function recordDownloadStatus(downloadId) {
   if (download && download.state === "in_progress") return;
   const status = download?.state === "complete" ? "complete" : "interrupted";
   const error = status === "complete" ? "" : (download?.error || "Không tìm thấy lượt tải trong Chrome.");
+  // Đối chiếu với đường dẫn Chrome THỰC SỰ dùng để lưu — trước đây log chỉ
+  // lặp lại tên đã yêu cầu (saved.filename) nên dù trình duyệt âm thầm đổi
+  // tên/bỏ qua thư mục con, log vẫn báo "thành công" với tên sai, khiến lỗi
+  // không bị phát hiện.
+  const actualPath = (download?.filename || "").replace(/\\/g, "/");
+  const actualName = actualPath.split("/").pop() || "";
+  const expectedName = saved.filename.split("/").pop() || "";
+  const mismatch = status === "complete" && actualName && actualName !== expectedName;
   let changed = false;
   await setState(current => {
     const previous = current.downloads[downloadId];
     if (!previous || previous.status !== "downloading") return {};
     changed = true;
-    return { downloads: { ...current.downloads, [downloadId]: { ...previous, status, error } } };
+    return { downloads: { ...current.downloads, [downloadId]: { ...previous, status, error, actualPath } } };
   });
-  if (changed) await log(status === "complete" ? "success" : "error",
-    status === "complete" ? "Đã tải xong: " + saved.filename : "Tải bị gián đoạn: " + saved.filename + " — " + error);
+  if (!changed) return;
+  if (mismatch) {
+    await setState({ lastFilenameMismatch: { wanted: saved.filename, actual: actualPath, ts: Date.now() } });
+    await log("error", "Chrome/Brave đã lưu file KHÁC tên/khác thư mục so với yêu cầu — yêu cầu: " +
+      saved.filename + " — thực tế: " + actualPath);
+  } else {
+    await log(status === "complete" ? "success" : "error",
+      status === "complete" ? "Đã tải xong: " + (actualPath || saved.filename) : "Tải bị gián đoạn: " + saved.filename + " — " + error);
+  }
 }
 
 async function reconcileDownloadIntent(key, record) {
@@ -159,40 +279,48 @@ async function reconcileDownloadIntent(key, record) {
 }
 
 const downloadsInProgress = new Set();
-async function downloadMedia(urls, promptText, subfolder, requestId) {
+async function downloadMedia(urls, promptText, subfolder, requestId, completedAt, orderIndex, template) {
   if (downloadsInProgress.has(requestId)) return;
   downloadsInProgress.add(requestId);
   try {
     for (let i = 0; i < urls.length; i++) {
-      const url = urls[i];
+      const sourceUrl = urls[i];
       const before = await getState();
-      const prior = Object.values(before.downloads).find(d => d.requestId === requestId && d.url === url &&
+      const prior = Object.values(before.downloads).find(d => d.requestId === requestId && d.sourceUrl === sourceUrl &&
         ["complete", "downloading", "starting"].includes(d.status));
       if (prior) continue;
       const key = "starting:" + requestId + ":" + i;
       let filename = "";
+      // Tải thẳng link CDN https thật — KHÔNG chuyển qua blob:/data: URL, vì
+      // với blob:/data: thì Chrome tự đặt tên theo UUID nội bộ và bỏ luôn thư
+      // mục con. Tên cuối cùng được khẳng định lại trong onDeterminingFilename.
       try {
-        const ext = mediaExtension(url);
+        const ext = mediaExtension(sourceUrl);
         const folder = downloadFolder(subfolder);
-        const name = sanitizeFilename(requestId) + "_" + sanitizeFilename(promptText) + "_" + (i + 1) + "." + ext;
+        const name = buildFilename(template, {
+          index: orderIndex, n: i + 1, seq: (Math.max(1, orderIndex) - 1) * urls.length + i + 1,
+          prompt: promptText, sourceUrl, completedAt, ext,
+        });
         filename = folder ? folder + "/" + name : name;
         // Save intent before asking Chrome, so suspension is visible, not silent.
         await setState(state => ({ downloads: { ...state.downloads,
-          [key]: { requestId, url, filename, status: "starting", startedAt: Date.now() } } }));
-        const id = await chrome.downloads.download({ url, filename, conflictAction: "uniquify" });
+          [key]: { requestId, sourceUrl, url: sourceUrl, filename, status: "starting", startedAt: Date.now() } } }));
+        pendingFilenames.set(sourceUrl, filename);
+        const id = await chrome.downloads.download({ url: sourceUrl, filename, conflictAction: "uniquify" });
         if (typeof id !== "number") throw new Error("Chrome không trả về mã lượt tải.");
         await setState(state => {
           const downloads = { ...state.downloads };
           delete downloads[key];
-          downloads[id] = { requestId, url, filename, status: "downloading", startedAt: Date.now() };
+          downloads[id] = { requestId, sourceUrl, url: sourceUrl, filename, status: "downloading", startedAt: Date.now() };
           return { downloads };
         });
         await log("info", "Đã bắt đầu tải: " + filename);
         // Covers completion before the onChanged listener can see the saved ID.
         await recordDownloadStatus(id);
       } catch (err) {
+        pendingFilenames.delete(sourceUrl);
         await setState(state => ({ downloads: { ...state.downloads,
-          [key]: { requestId, url, filename, status: "interrupted", error: String(err.message || err) } } }));
+          [key]: { requestId, sourceUrl, url: sourceUrl, filename, status: "interrupted", error: String(err.message || err) } } }));
         await log("error", "Không tải được ảnh " + (i + 1) + ": " + String(err.message || err));
       }
     }
@@ -288,8 +416,8 @@ function handleDebugInput(msg, sender) {
       return item;
     };
     const item = await guard();
-    if (!["insertText", "click", "submit", "escape"].includes(msg.action)) throw new Error("Lệnh debug không hỗ trợ.");
-    if (msg.action !== "escape" && (typeof msg.marker !== "string" || !msg.marker.startsWith(item.id + ":") || msg.marker.length > 160)) {
+    if (!["insertText", "click", "submit", "escape", "clickOutside"].includes(msg.action)) throw new Error("Lệnh debug không hỗ trợ.");
+    if (!["escape", "clickOutside"].includes(msg.action) && (typeof msg.marker !== "string" || !msg.marker.startsWith(item.id + ":") || msg.marker.length > 160)) {
       throw new Error("Đích thao tác không hợp lệ.");
     }
     if (item.debugSubmitAttempted) throw new Error("Đã thử gửi prompt này; không tự gửi lần hai.");
@@ -299,6 +427,8 @@ function handleDebugInput(msg, sender) {
       await updateItem(item.id, { debugTextInserted: true });
     } else if (msg.action === "escape") {
       await debugInput.escape(guard);
+    } else if (msg.action === "clickOutside") {
+      await debugInput.clickOutside(guard);
     } else {
       if (msg.action === "submit") {
         if (!item.debugTextInserted) throw new Error("Chưa xác nhận nhập prompt.");
@@ -332,6 +462,11 @@ async function processQueue(epoch) {
   try {
     let state = await getState();
     if (!state.tabId) throw new Error("Chưa gắn tab Midjourney.");
+    const attachedTab = await chrome.tabs.get(state.tabId).catch(() => null);
+    if (!attachedTab || !/^https:\/\/(www\.)?midjourney\.com\//i.test(attachedTab.url || "")) {
+      await setState({ tabId: null });
+      throw new Error("Tab đã gắn không còn tồn tại hoặc không phải Midjourney. Gắn lại tab rồi chạy lại.");
+    }
     await setState({ running: true, paused: false, pauseReason: "" });
     if (state.inputMode === "debugger") await debugInput.attach(state.tabId);
     await log("info", "Bắt đầu hàng đợi. Tối đa " + flightLimit(state) + " prompt đang tạo.");
@@ -401,30 +536,41 @@ async function processQueue(epoch) {
 async function handleJobResult(msg, sender) {
   let accepted = false;
   let item;
+  const completedAt = Date.now();
   const state = await setState(current => ({ items: current.items.map(it => {
     if (it.id !== msg.requestId || !["running", "generating"].includes(it.status)) return it;
     if (sender?.tab?.id !== it.tabId && it.tabId != null) return it;
     accepted = true;
     item = it;
     return { ...it, status: msg.ok ? "done" : "review", note: msg.note || "",
-      mediaUrls: msg.mediaUrls || [], gridKey: msg.gridKey || "", completedAt: Date.now() };
+      mediaUrls: msg.mediaUrls || [], gridKey: msg.gridKey || "", completedAt };
   }) }));
   if (!accepted) return;
   wakeQueue();
   await log(msg.ok ? "success" : "error", msg.note || (msg.ok ? "Đã tạo xong ảnh." : "Chưa xác nhận được ảnh."));
   if (!msg.ok) await pauseQueue(msg.note || "Job cần kiểm tra thủ công trước khi gửi tiếp.");
   if (msg.ok && state.autoDownload && msg.mediaUrls?.length) {
-    await downloadMedia(msg.mediaUrls, item.text, state.downloadSubfolder, item.id);
+    await downloadMedia(msg.mediaUrls, item.text, state.downloadSubfolder, item.id, completedAt,
+      item.orderIndex, state.filenameTemplate);
   }
 }
 
 // Worker restart does not prove that an interrupted submit failed.
 const startupReady = (async () => {
   await setState(state => ({ running: false, debuggerStatus: "off", debuggerTabId: null, nextSubmitAt: null,
+    // Nâng mẫu tên file cũ lên mẫu có seed; chỉ đụng vào khi người dùng vẫn
+    // đang để đúng mẫu mặc định trước đây, không ghi đè mẫu tự đặt.
+    filenameTemplate: state.filenameTemplate === "{index}_{n}" ? "{index}_{seed}_{n}" : state.filenameTemplate,
     paused: state.running ? true : state.paused,
     pauseReason: state.running ? "Tiện ích vừa khởi động lại. Kiểm tra job đang gửi rồi bấm Chạy để tiếp tục." : state.pauseReason,
-    items: state.items.map(it => it.status === "running" ? { ...it, status: "review",
-      note: "Tiện ích khởi động lại khi đang gửi; cần kiểm tra trên Midjourney." } : it) }));
+    // Mục thêm từ bản cũ chưa có orderIndex — gán theo đúng vị trí hiện tại
+    // để tên file vẫn đánh số liền mạch thay vì rơi về 000.
+    items: state.items.map((it, i) => {
+      const withOrder = it.orderIndex ? it : { ...it, orderIndex: i + 1 };
+      return withOrder.status === "running"
+        ? { ...withOrder, status: "review", note: "Tiện ích khởi động lại khi đang gửi; cần kiểm tra trên Midjourney." }
+        : withOrder;
+    }) }));
   const state = await getState();
   for (const [id, record] of Object.entries(state.downloads)) {
     if (record.status === "downloading") await recordDownloadStatus(id);
@@ -439,6 +585,19 @@ chrome.tabs.onUpdated.addListener((tabId, changes) => {
   startupReady.then(async () => {
     const state = await getState();
     if (state.running && state.tabId === tabId) await pauseQueue("Tab đã rời Midjourney; dừng gửi prompt.");
+  }).catch(console.error);
+});
+
+// Tab đã gắn có thể bị đóng trong lúc hàng đợi không chạy (idle) — nếu không
+// dọn state.tabId thì side panel vẫn báo "Đã gắn tab" dù tab đó không còn
+// tồn tại, và lần bấm Chạy kế tiếp sẽ báo lỗi khó hiểu ("Receiving end does
+// not exist") thay vì một thông báo rõ ràng.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  startupReady.then(async () => {
+    const state = await getState();
+    if (state.tabId !== tabId) return;
+    if (state.running) await pauseQueue("Tab Midjourney đã gắn vừa bị đóng; dừng gửi prompt.");
+    await setState({ tabId: null });
   }).catch(console.error);
 });
 
@@ -479,15 +638,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse(items);
         break;
       }
-      case "SET_ITEMS":
-        sendResponse(await setState(state => ({ items: msg.items.map(item =>
-          state.items.find(existing => existing.id === item.id) || item) })));
-        break;
       case "APPEND_ITEMS":
-        sendResponse(await setState(state => ({ items: [...state.items, ...msg.items] })));
+        // orderIndex gắn cố định lúc thêm vào hàng đợi (nối tiếp số lớn nhất
+        // đang có) để tên file luôn khớp thứ tự dòng trong Excel, kể cả khi
+        // sau đó có xoá bớt mục hay chạy lại.
+        sendResponse(await setState(state => {
+          const base = state.items.reduce((max, it) => Math.max(max, Number(it.orderIndex) || 0),
+            Math.max(0, (Number(state.startIndex) || 1) - 1));
+          return { items: [...state.items, ...msg.items.map((item, i) => ({ ...item, orderIndex: base + i + 1 }))] };
+        }));
         break;
       case "REMOVE_ITEM":
         sendResponse(await setState(state => ({ items: state.items.filter(item => item.id !== msg.id) })));
+        break;
+      case "CLEAR_COMPLETED":
+        sendResponse(await setState(state => ({ items: state.items.filter(item => item.status !== "done") })));
+        break;
+      case "RETRY_FAILED":
+        // Đưa các mục Lỗi/Cần kiểm tra về Chờ để gửi lại; giữ nguyên orderIndex
+        // nên tên file vẫn đúng số thứ tự cũ.
+        sendResponse(await setState(state => ({ items: state.items.map(item =>
+          ["error", "review"].includes(item.status)
+            ? { ...item, status: "pending", note: "", debugTextInserted: false, debugSubmitAttempted: false }
+            : item) })));
+        break;
+      case "SET_FILENAME_TEMPLATE":
+        sendResponse(await setState({ filenameTemplate: String(msg.template || "").trim() || "{index}_{n}" }));
+        break;
+      case "SET_START_INDEX":
+        sendResponse(await setState({ startIndex: Math.max(1, Math.min(9999, Math.floor(Number(msg.startIndex) || 1))) }));
+        break;
+      case "DISMISS_FILENAME_MISMATCH":
+        sendResponse(await setState({ lastFilenameMismatch: null }));
         break;
       case "SET_MAX_IN_FLIGHT":
         sendResponse(await setState({ maxInFlight: flightLimit(msg) }));
@@ -502,14 +684,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "RETRY_DOWNLOAD": {
         const state = await getState();
         const item = state.items.find(it => it.id === msg.id);
-        if (item?.mediaUrls?.length) await downloadMedia(item.mediaUrls, item.text, state.downloadSubfolder, item.id);
+        if (item?.mediaUrls?.length) await downloadMedia(item.mediaUrls, item.text, state.downloadSubfolder, item.id,
+          item.completedAt, item.orderIndex, state.filenameTemplate);
         sendResponse(await getState());
         break;
       }
       case "RETRY_ALL_DOWNLOADS": {
         const state = await getState();
         for (const item of state.items.filter(it => it.mediaUrls?.length)) {
-          await downloadMedia(item.mediaUrls, item.text, state.downloadSubfolder, item.id);
+          await downloadMedia(item.mediaUrls, item.text, state.downloadSubfolder, item.id,
+            item.completedAt, item.orderIndex, state.filenameTemplate);
         }
         sendResponse(await getState());
         break;
@@ -539,11 +723,37 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       case "CLEAR_LOGS":
         sendResponse(await setState({ logs: [] }));
         break;
+      case "DIAG_TEST_DOWNLOAD": {
+        // Chẩn đoán tạm thời: tải 1 file KHÔNG liên quan tới Midjourney (để
+        // loại trừ CDN/host_permissions) với tên tuỳ chỉnh, rồi đối chiếu
+        // tên Chrome/Brave thực sự lưu — xác định đây là hành vi chung của
+        // trình duyệt hay chỉ riêng với link CDN Midjourney.
+        const testFilename = "midjourney-output/_diag_test_" + Date.now() + ".ico";
+        await log("info", "Chẩn đoán: yêu cầu tải favicon Google với tên " + testFilename);
+        const id = await chrome.downloads.download({ url: "https://www.google.com/favicon.ico", filename: testFilename, conflictAction: "uniquify" });
+        await new Promise((r) => setTimeout(r, 1500));
+        const [dl] = await chrome.downloads.search({ id });
+        await log("info", "Chẩn đoán kết quả — yêu cầu: " + testFilename + " — Chrome/Brave thực tế lưu: " +
+          (dl?.filename || "(không rõ)") + " — trạng thái: " + (dl?.state || "?"));
+        sendResponse(await getState());
+        break;
+      }
       case "ATTACH_ACTIVE_TAB": {
         if (queueTask) throw new Error("Dừng hàng đợi trước khi đổi tab.");
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!tab?.url || !/^https:\/\/(www\.)?midjourney\.com\//i.test(tab.url)) throw new Error("Hãy mở tab Midjourney trước khi gắn tab.");
-        sendResponse(await setState({ tabId: tab ? tab.id : null }));
+        const MJ_URL_RE = /^https:\/\/(www\.)?midjourney\.com\//i;
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        // Tab đang active trong cửa sổ hiện tại (nơi vừa bấm nút) là ưu tiên
+        // hàng đầu — đúng cái người dùng đang nhìn. Chỉ khi đó KHÔNG phải tab
+        // Midjourney (vd. side panel mở trong cửa sổ khác tab đích) mới tìm
+        // trong mọi cửa sổ, ưu tiên tab được dùng gần nhất.
+        let tab = activeTab && MJ_URL_RE.test(activeTab.url || "") ? activeTab : null;
+        if (!tab) {
+          const candidates = await chrome.tabs.query({ url: ["https://www.midjourney.com/*", "https://midjourney.com/*"] });
+          candidates.sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0));
+          tab = candidates[0] || null;
+        }
+        if (!tab) throw new Error("Hãy mở tab Midjourney trước khi gắn tab.");
+        sendResponse(await setState({ tabId: tab.id }));
         break;
       }
       case "START":

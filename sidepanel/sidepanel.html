@@ -29,6 +29,44 @@
         <button id="attachTabQuick" class="ghost small">Gắn tab đang mở</button>
       </div>
 
+      <div class="quick-settings-grid">
+        <div class="card">
+          <div class="card-header"><label>⚡ Prompt đồng thời</label></div>
+          <select id="maxInFlight">
+            <option value="1">1 prompt</option>
+            <option value="2">2 prompt</option>
+            <option value="3">3 prompt</option>
+            <option value="4">4 prompt</option>
+            <option value="5">5 prompt</option>
+            <option value="6">6 prompt</option>
+            <option value="7">7 prompt</option>
+            <option value="8">8 prompt</option>
+            <option value="9">9 prompt</option>
+            <option value="10">10 prompt</option>
+          </select>
+          <p class="hint">Số lượng prompt cần xử lý cùng lúc.</p>
+        </div>
+        <div class="card">
+          <div class="card-header"><label>🕒 Thời gian chờ ngẫu nhiên</label></div>
+          <div class="range-row">
+            <input type="number" id="delayMin" min="1" max="600" value="5" />
+            <span class="range-sep">⇄</span>
+            <input type="number" id="delayMax" min="1" max="600" value="15" />
+          </div>
+          <p class="hint">Thời gian chờ ngẫu nhiên trước khi xử lý prompt tiếp theo.</p>
+        </div>
+      </div>
+      <div class="toggle-row continuous-row">
+        <label class="switch">
+          <input type="checkbox" id="continuousMode" />
+          <span class="slider"></span>
+        </label>
+        <label for="continuousMode" class="toggle-label">Chế độ làm liên tục (không chờ giữa prompt)</label>
+      </div>
+      <p class="hint continuous-hint hidden" id="continuousHint">
+        Bỏ khoảng nghỉ khi còn chỗ trống. Vẫn tuân theo số prompt đồng thời và dừng khi Midjourney báo giới hạn.
+      </p>
+
       <div class="card">
         <div class="card-header">
           <label>Prompts</label>
@@ -47,17 +85,33 @@
         <button id="addFromPaste" class="secondary full">+ Thêm vào hàng đợi</button>
       </div>
 
+      <div class="alert hidden" id="filenameAlert">
+        <div class="alert-body">
+          <strong>Trình duyệt đang tự đổi tên file tải về.</strong>
+          <span id="filenameAlertDetail"></span>
+          <span class="alert-hint">Thường do một tiện ích quản lý tải khác giành quyền đặt tên. Tắt tiện ích đó rồi tải lại.</span>
+        </div>
+        <button id="dismissFilenameAlert" class="ghost small">Ẩn</button>
+      </div>
+
       <div class="card grow">
         <div class="card-header">
           <label>Hàng đợi prompt</label>
           <span class="count-badge" id="queueCount">0</span>
         </div>
+        <div class="progress-wrap">
+          <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+          <p class="hint" id="queueProgress"></p>
+        </div>
         <ul id="queueList" class="queue-list"></ul>
         <p class="empty-hint" id="emptyHint">Chưa có prompt nào trong hàng đợi.</p>
-        <p class="hint" id="queueProgress"></p>
         <p class="hint" id="queuePauseReason"></p>
         <p class="hint" id="queueTiming"></p>
-        <button id="retryAllDownloads" class="ghost small">Tải ảnh còn thiếu của cả hàng đợi</button>
+        <div class="card-actions wrap">
+          <button id="retryFailed" class="ghost small">Thử lại mục lỗi</button>
+          <button id="clearCompleted" class="ghost small">Xoá mục đã xong</button>
+          <button id="retryAllDownloads" class="ghost small">Tải ảnh còn thiếu</button>
+        </div>
       </div>
     </section>
 
@@ -154,28 +208,6 @@
       </div>
 
       <div class="card">
-        <div class="card-header"><label>Thời gian chờ ngẫu nhiên giữa các prompt (giây)</label></div>
-        <div class="range-row">
-          <input type="number" id="delayMin" min="1" max="600" value="5" />
-          <span class="range-sep">→</span>
-          <input type="number" id="delayMax" min="1" max="600" value="15" />
-        </div>
-        <div class="toggle-row continuous-row">
-          <label class="switch">
-            <input type="checkbox" id="continuousMode" />
-            <span class="slider"></span>
-          </label>
-          <label for="continuousMode" class="toggle-label">Chế độ làm liên tục (không chờ giữa prompt)</label>
-        </div>
-        <label class="settings-field-label" for="maxInFlight">Số prompt đang tạo tối đa</label>
-        <input type="number" id="maxInFlight" min="1" max="10" value="1" />
-        <p class="hint">Mặc định 1. Chỉ tăng trong giới hạn tài khoản Midjourney của bạn. Tool chờ job hoàn tất trước khi lấy chỗ cho prompt tiếp theo.</p>
-        <p class="hint continuous-hint" id="continuousHint">
-          Bỏ khoảng nghỉ khi còn chỗ trống. Vẫn tuân theo số prompt đang tạo tối đa và dừng khi Midjourney báo giới hạn.
-        </p>
-      </div>
-
-      <div class="card">
         <div class="toggle-row">
           <label class="switch">
             <input type="checkbox" id="autoDownload" />
@@ -184,7 +216,34 @@
           <label for="autoDownload" class="toggle-label">Tự động tải ảnh xuống Downloads</label>
         </div>
         <input type="text" id="downloadSubfolder" placeholder="Thư mục con, VD: midjourney-output" />
-        <p class="hint">Tải trực tiếp ảnh từ link CDN, giữ định dạng nguồn (.webp, .png…). Đây là ảnh hiện trong lưới kết quả, chưa đảm bảo độ phân giải gốc. Chỉ báo tải xong khi trình duyệt xác nhận. Có thể tải lại file lỗi ngay trong hàng đợi. File nằm trong Downloads/thư mục con đã chọn.</p>
+        <p class="hint">Tải trực tiếp ảnh từ link CDN, giữ định dạng nguồn (.webp, .png…). Đây là ảnh hiện trong lưới kết quả, chưa đảm bảo độ phân giải gốc. Chỉ báo tải xong khi trình duyệt xác nhận. File nằm trong Downloads/thư mục con đã chọn.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><label>Đặt tên file</label></div>
+        <div class="settings-grid">
+          <div class="settings-field">
+            <span class="settings-field-label">Mẫu tên file</span>
+            <input type="text" id="filenameTemplate" placeholder="{index}_{n}" />
+          </div>
+          <div class="settings-field">
+            <span class="settings-field-label">Số bắt đầu</span>
+            <input type="number" id="startIndex" min="1" max="9999" value="1" />
+          </div>
+        </div>
+        <p class="hint filename-preview" id="filenamePreview"></p>
+        <p class="hint">
+          Biến dùng được: <code>{index}</code> số thứ tự prompt (theo thứ tự dòng Excel, 3 chữ số) ·
+          <code>{n}</code> số ảnh trong prompt (1–4) · <code>{seed}</code> seed lấy từ tham số
+          <code>--seed</code> trong prompt · <code>{seq}</code> số chạy liên tục ·
+          <code>{date}</code> · <code>{time}</code> · <code>{prompt}</code> ·
+          <code>{job}</code> ID job rút gọn · <code>{jobfull}</code> ID job đầy đủ.
+          "Số bắt đầu" chỉ áp dụng cho prompt thêm mới khi hàng đợi đang trống.
+        </p>
+        <p class="hint">
+          Prompt không có <code>--seed</code> thì phần seed tự lược bỏ khỏi tên file
+          (<code>001_52000101_1</code> → <code>001_1</code>), không để lại dấu gạch dưới thừa.
+        </p>
       </div>
     </section>
 
@@ -194,6 +253,7 @@
           <label>Nhật ký gỡ lỗi</label>
           <button id="clearLogs" class="ghost small">Xoá log</button>
           <button id="exportReport" class="ghost small">Xuất báo cáo</button>
+          <button id="diagTestDownload" class="ghost small">Chẩn đoán tải file</button>
         </div>
         <div id="logList" class="log-list"></div>
         <p class="empty-hint" id="emptyLogHint">Chưa có nhật ký nào.</p>

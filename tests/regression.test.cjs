@@ -27,12 +27,12 @@ async function background(initial = {}) {
     storage: { local: { get: async () => ({ paf_state: structuredClone(stored) }),
       set: async data => { stored = structuredClone(data.paf_state); } } },
     runtime: { onMessage: event(), sendMessage: async message => { messages.push(message); } },
-    tabs: { onUpdated: event(), sendMessage(id, message, cb) { calls.push(message); cb({ ok: true, submitted: true }); },
+    tabs: { onUpdated: event(), onRemoved: event(), sendMessage(id, message, cb) { calls.push(message); cb({ ok: true, submitted: true }); },
       get: async id => ({ id, url: 'https://www.midjourney.com/imagine' }),
       query: async () => [{ id: 7, url: 'https://www.midjourney.com/imagine' }] },
     debugger: { onDetach: event(), attach: async () => {}, detach: async () => {}, sendCommand: async () => ({ result: { value: true } }) },
     scripting: { executeScript: async () => {} },
-    downloads: { onChanged: event(), async download(options) {
+    downloads: { onChanged: event(), onDeterminingFilename: event(), async download(options) {
       const id = files.size + 1;
       files.set(id, { id, state: 'in_progress', ...options }); return id;
     }, search: async ({ id }) => files.has(id) ? [files.get(id)] : [] }
@@ -117,13 +117,81 @@ test('similar prompts and historical grids cannot be selected for download', () 
 
 test('download is not complete at acceptance; extension matches source bytes format', async () => {
   const b = await background();
-  await b.context.downloadMedia(['https://cdn.midjourney.com/a/0_0.webp'], 'test', 'folder', 'one');
-  assert.equal(b.files.get(1).filename, 'folder/one_test_1.webp');
+  await b.context.downloadMedia(['https://cdn.midjourney.com/a/0_0.webp'], 'test', 'folder', 'one', Date.now(), 7, '{index}_{n}');
+  assert.equal(b.files.get(1).filename, 'folder/007_1.webp');
   assert.equal(b.state().downloads[1].status, 'downloading');
   assert.equal(b.state().logs.some(log => /Đã tải xong/.test(log.message)), false);
   b.files.get(1).state = 'complete';
   b.chrome.downloads.onChanged.listeners[0]({ id: 1, state: { current: 'complete' } });
   await until(() => b.state().downloads[1].status === 'complete');
+});
+
+test('filename is reasserted during determination, not only suggested at download', async () => {
+  const b = await background();
+  await b.context.downloadMedia(['https://cdn.midjourney.com/a/0_0.webp'], 'test', 'out', 'one', Date.now(), 2, '{index}_{n}');
+  const listener = b.chrome.downloads.onDeterminingFilename.listeners[0];
+  assert.ok(listener, 'phải đăng ký onDeterminingFilename, nếu không extension khác sẽ ghi đè tên');
+  let suggested = null;
+  listener({ id: 1, url: 'https://cdn.midjourney.com/a/0_0.webp', filename: '0_0.webp' }, s => { suggested = s; });
+  assert.equal(suggested.filename, 'out/002_1.webp');
+});
+
+test('determination leaves unrelated downloads to the browser', async () => {
+  const b = await background();
+  let called = 'none';
+  b.chrome.downloads.onDeterminingFilename.listeners[0](
+    { id: 9, url: 'https://example.com/other.zip', filename: 'other.zip' },
+    s => { called = s === undefined ? 'default' : s; });
+  await until(() => called !== 'none');
+  assert.equal(called, 'default');
+});
+
+test('SOP numbering follows queue order and survives removals', async () => {
+  const b = await background();
+  await b.message({ type: 'APPEND_ITEMS', items: [{ id: 'a', text: 'one' }, { id: 'b', text: 'two' }, { id: 'c', text: 'three' }] });
+  assert.deepEqual(b.state().items.map(it => it.orderIndex), [1, 2, 3]);
+  await b.message({ type: 'REMOVE_ITEM', id: 'b' });
+  await b.message({ type: 'APPEND_ITEMS', items: [{ id: 'd', text: 'four' }] });
+  // 'c' giữ số 3 dù 'b' đã bị xoá; mục mới nối tiếp số lớn nhất, không tái sử dụng số cũ.
+  assert.deepEqual(b.state().items.map(it => [it.id, it.orderIndex]), [['a', 1], ['c', 3], ['d', 4]]);
+});
+
+test('each image of one prompt keeps the prompt number with its own image index', async () => {
+  const b = await background();
+  const urls = [0, 1, 2, 3].map(i => `https://cdn.midjourney.com/a/0_${i}.webp`);
+  await b.context.downloadMedia(urls, 'test', '', 'one', Date.now(), 12, '{index}_{n}');
+  assert.deepEqual([1, 2, 3, 4].map(id => b.files.get(id).filename),
+    ['012_1.webp', '012_2.webp', '012_3.webp', '012_4.webp']);
+});
+
+const SOP_PROMPT = 'A single cinematic documentary reconstruction in a non-site-specific western Eurasian landscape, '
+  + 'Late Pleistocene, approximately 60000–40000 years ago: A small Neanderthal group shelters beneath limestone '
+  + 'while sleet closes the valley.; no text, no captions, no logos --ar 16:9 --seed 52000101';
+
+test('seed is taken from the --seed parameter inside the prompt', async () => {
+  const b = await background();
+  const urls = [0, 1].map(i => `https://cdn.midjourney.com/a/0_${i}.webp`);
+  await b.context.downloadMedia(urls, SOP_PROMPT, '', 'one', Date.now(), 1, '{index}_{seed}_{n}');
+  assert.deepEqual([1, 2].map(id => b.files.get(id).filename),
+    ['001_52000101_1.webp', '001_52000101_2.webp']);
+});
+
+test('prompt without a seed collapses the empty slot instead of leaving a stray separator', async () => {
+  const b = await background();
+  await b.context.downloadMedia(['https://cdn.midjourney.com/a/0_0.webp'], 'a caveman --ar 16:9', '', 'one', Date.now(), 3, '{index}_{seed}_{n}');
+  assert.equal(b.files.get(1).filename, '003_1.webp');
+});
+
+test('{prompt} drops Midjourney parameter flags', async () => {
+  const b = await background();
+  await b.context.downloadMedia(['https://cdn.midjourney.com/a/0_0.webp'], 'a bearded caveman --ar 16:9 --seed 7', '', 'one', Date.now(), 1, '{prompt}_{seed}');
+  assert.equal(b.files.get(1).filename, 'a_bearded_caveman_7.webp');
+});
+
+test('{prompt} also drops a single-dash parameter tail (Excel/Word autocorrect shrinks -- to one dash)', async () => {
+  const b = await background();
+  await b.context.downloadMedia(['https://cdn.midjourney.com/a/0_0.webp'], 'a bearded caveman –seed 7', '', 'one', Date.now(), 1, '{prompt}_{seed}');
+  assert.equal(b.files.get(1).filename, 'a_bearded_caveman_7.webp');
 });
 
 test('interrupted download can be retried without duplicating successful files', async () => {

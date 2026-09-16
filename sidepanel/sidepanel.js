@@ -28,6 +28,15 @@ const inputModeEl = document.getElementById("inputMode");
 const debugStatusEl = document.getElementById("debugStatus");
 const queueTimingEl = document.getElementById("queueTiming");
 const retryAllDownloadsBtn = document.getElementById("retryAllDownloads");
+const retryFailedBtn = document.getElementById("retryFailed");
+const clearCompletedBtn = document.getElementById("clearCompleted");
+const progressFillEl = document.getElementById("progressFill");
+const filenameAlertEl = document.getElementById("filenameAlert");
+const filenameAlertDetailEl = document.getElementById("filenameAlertDetail");
+const dismissFilenameAlertBtn = document.getElementById("dismissFilenameAlert");
+const filenameTemplateEl = document.getElementById("filenameTemplate");
+const startIndexEl = document.getElementById("startIndex");
+const filenamePreviewEl = document.getElementById("filenamePreview");
 const exportReportBtn = document.getElementById("exportReport");
 const pasteArea = document.getElementById("pasteArea");
 const addFromPasteBtn = document.getElementById("addFromPaste");
@@ -98,6 +107,36 @@ let lastState = null;
 let lastQueueRenderKey = "";
 let lastLogsRenderKey = "";
 
+// Xem trước tên file đúng như background.js sẽ tạo, để chỉnh mẫu thấy ngay
+// kết quả thay vì phải chạy thử rồi mới biết sai.
+function renderFilenamePreview(state) {
+  const pad3 = (v) => String(Math.max(0, Math.floor(Number(v) || 0))).padStart(3, "0");
+  const now = new Date();
+  const two = (n) => String(n).padStart(2, "0");
+  const index = Number(state.startIndex) || 1;
+  // Lấy seed thật từ prompt đầu tiên trong hàng đợi nếu có, để xem trước đúng
+  // với dữ liệu thật thay vì số minh hoạ.
+  const realSeed = (state.items || []).map(it => (String(it.text || "").match(/[-–—]{1,2}\s*seed\s+(\d{1,20})/i) || [])[1])
+    .find(Boolean);
+  const tokens = {
+    index: pad3(index),
+    n: "1",
+    seq: pad3(index),
+    seed: realSeed || "52000101",
+    date: `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}`,
+    time: `${two(now.getHours())}${two(now.getMinutes())}${two(now.getSeconds())}`,
+    prompt: "a_realistic_digital_painting_of_prehistoric_survival",
+    job: "e69a2e3ac6fd",
+    jobfull: "e69a2e3a-c6fd-4789-9e94-c1013ef8f92b",
+  };
+  const base = String(state.filenameTemplate || "{index}_{n}")
+    .replace(/\{(index|n|seq|seed|date|time|prompt|jobfull|job)\}/g, (_, key) => tokens[key])
+    .replace(/[\\/:*?"<>|]+/g, "_").replace(/_{2,}/g, "_").replace(/^[_\-.]+|[_\-.]+$/g, "")
+    .trim().slice(0, 120).replace(/[._ ]+$/g, "") || `${tokens.index}_1`;
+  const folder = (state.downloadSubfolder || "").trim();
+  filenamePreviewEl.textContent = "Ví dụ: " + (folder ? folder + "/" : "") + base + ".webp";
+}
+
 function renderTiming() {
   if (!lastState) return;
   const samples = lastState.items.map(item => item.submitDurationMs).filter(Number.isFinite);
@@ -125,8 +164,25 @@ function renderState(state) {
   maxInFlightEl.value = state.maxInFlight || 1;
   const active = state.items.filter(item => ["running", "generating"].includes(item.status)).length;
   const done = state.items.filter(item => item.status === "done").length;
-  queueProgressEl.textContent = `Đã tạo: ${done}/${state.items.length} • Đang gửi/tạo: ${active}/${state.maxInFlight || 1}`;
+  const failed = state.items.filter(item => ["error", "review"].includes(item.status)).length;
+  queueProgressEl.textContent = state.items.length
+    ? `Đã tạo ${done}/${state.items.length} • Đang gửi/tạo ${active}/${state.maxInFlight || 1}` + (failed ? ` • Cần xử lý ${failed}` : "")
+    : "";
+  progressFillEl.style.width = state.items.length ? Math.round((done / state.items.length) * 100) + "%" : "0%";
+  retryFailedBtn.disabled = failed === 0;
+  clearCompletedBtn.disabled = done === 0;
+  retryAllDownloadsBtn.disabled = !state.items.some(item => item.mediaUrls?.length);
   queuePauseReasonEl.textContent = state.pauseReason || "";
+
+  filenameTemplateEl.value = state.filenameTemplate || "{index}_{n}";
+  startIndexEl.value = state.startIndex || 1;
+  renderFilenamePreview(state);
+
+  const mismatch = state.lastFilenameMismatch;
+  filenameAlertEl.classList.toggle("hidden", !mismatch);
+  if (mismatch) {
+    filenameAlertDetailEl.textContent = `Yêu cầu "${mismatch.wanted}" nhưng lưu thành "${mismatch.actual}".`;
+  }
   delayMinEl.disabled = !!state.continuousMode;
   delayMaxEl.disabled = !!state.continuousMode;
   if (continuousHintEl) {
@@ -171,6 +227,13 @@ function renderState(state) {
   for (const item of state.items) {
     const li = document.createElement("li");
 
+    // Số thứ tự hiển thị đúng bằng số sẽ dùng trong tên file, để đối chiếu
+    // nhanh giữa hàng đợi, dòng Excel và file trong thư mục tải về.
+    const order = document.createElement("span");
+    order.className = "order-badge";
+    order.textContent = String(item.orderIndex || 0).padStart(3, "0");
+    order.title = "Số thứ tự dùng trong tên file";
+
     const badge = document.createElement("span");
     badge.className = `badge ${item.status}`;
     badge.textContent = STATUS_LABEL[item.status] || item.status;
@@ -198,7 +261,7 @@ function renderState(state) {
     }
     const records = Object.values(state.downloads || {}).filter(record => record.requestId === item.id);
     if (item.mediaUrls?.length) {
-      const completed = new Set(records.filter(r => r.status === "complete").map(r => r.url)).size;
+      const completed = new Set(records.filter(r => r.status === "complete").map(r => r.sourceUrl || r.url)).size;
       const downloading = records.filter(r => ["downloading", "starting"].includes(r.status));
       const summary = document.createElement("small");
       summary.textContent = `Đã tải: ${completed}/${item.mediaUrls.length}` + (downloading.length ? ` • Đang tải: ${downloading.length}` : "");
@@ -227,6 +290,7 @@ function renderState(state) {
       checked.addEventListener("click", async () => renderState(await sendMsg({ type: "CONFIRM_REVIEW", id: item.id })));
       details.appendChild(checked);
     }
+    li.appendChild(order);
     li.appendChild(badge);
     li.appendChild(details);
     li.appendChild(removeBtn);
@@ -300,6 +364,24 @@ retryAllDownloadsBtn.addEventListener("click", async () => {
   try { renderState(await sendMsg({ type: "RETRY_ALL_DOWNLOADS" })); }
   finally { retryAllDownloadsBtn.disabled = false; }
 });
+retryFailedBtn.addEventListener("click", async () => {
+  renderState(await sendMsg({ type: "RETRY_FAILED" }));
+});
+clearCompletedBtn.addEventListener("click", async () => {
+  renderState(await sendMsg({ type: "CLEAR_COMPLETED" }));
+});
+dismissFilenameAlertBtn.addEventListener("click", async () => {
+  renderState(await sendMsg({ type: "DISMISS_FILENAME_MISMATCH" }));
+});
+filenameTemplateEl.addEventListener("change", async () => {
+  renderState(await sendMsg({ type: "SET_FILENAME_TEMPLATE", template: filenameTemplateEl.value }));
+});
+filenameTemplateEl.addEventListener("input", () => {
+  if (lastState) renderFilenamePreview({ ...lastState, filenameTemplate: filenameTemplateEl.value });
+});
+startIndexEl.addEventListener("change", async () => {
+  renderState(await sendMsg({ type: "SET_START_INDEX", startIndex: startIndexEl.value }));
+});
 exportReportBtn.addEventListener("click", () => {
   if (!lastState) return;
   const report = { version: chrome.runtime.getManifest().version, exportedAt: new Date().toISOString(),
@@ -360,6 +442,13 @@ clearLogsBtn.addEventListener("click", async () => {
   renderState(await sendMsg({ type: "CLEAR_LOGS" }));
 });
 
+const diagTestDownloadBtn = document.getElementById("diagTestDownload");
+diagTestDownloadBtn.addEventListener("click", async () => {
+  diagTestDownloadBtn.disabled = true;
+  try { renderState(await sendMsg({ type: "DIAG_TEST_DOWNLOAD" })); }
+  finally { diagTestDownloadBtn.disabled = false; }
+});
+
 attachTabBtn.addEventListener("click", async () => {
   renderState(await sendMsg({ type: "ATTACH_ACTIVE_TAB" }));
 });
@@ -375,9 +464,18 @@ async function appendPrompts(lines) {
   renderState(await sendMsg({ type: "APPEND_ITEMS", items: newItems }));
 }
 
+function autosizePasteArea() {
+  pasteArea.style.height = "auto";
+  const max = parseInt(getComputedStyle(pasteArea).maxHeight, 10) || 420;
+  pasteArea.style.height = Math.min(pasteArea.scrollHeight, max) + "px";
+}
+pasteArea.addEventListener("input", autosizePasteArea);
+autosizePasteArea();
+
 addFromPasteBtn.addEventListener("click", async () => {
   await appendPrompts(pasteArea.value.split("\n"));
   pasteArea.value = "";
+  autosizePasteArea();
 });
 
 importTextFile.addEventListener("change", async (e) => {
