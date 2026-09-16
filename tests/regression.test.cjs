@@ -124,6 +124,27 @@ test('diagnoseNoMatch names exactly which assumption about the Midjourney page i
   assert.match(c.diagnoseNoMatch('test prompt', [{ text: 'test prompt' }]), /chưa được tool coi là tải xong/);
 });
 
+test('promptMatchScore accepts Midjourney truncating the displayed prompt, never the reverse', () => {
+  const { context: c } = content();
+  const full = 'a'.repeat(50) + ' the rest of a very long sop prompt that midjourney truncates in the grid row';
+  assert.equal(c.promptMatchScore(full, full), 1000);
+  assert.equal(c.promptMatchScore(full, full.slice(0, 45) + '...'), 500);
+  assert.equal(c.promptMatchScore(full, full.slice(0, 45) + '…'), 500);
+  // A short submitted prompt must never "match" an unrelated long candidate
+  // just because it happens to start with the same short text — only the
+  // page's displayed text may be a truncated prefix of what was submitted,
+  // not the other way around.
+  assert.equal(c.promptMatchScore('a cat', 'a cat sitting on a mat in a sunny garden full of flowers and trees'), 0);
+  assert.equal(c.promptMatchScore('short prompt', 'short prompt but this is actually a completely different job'), 0);
+});
+
+test('normalizePromptText strips the --ar/--seed parameter tail before comparing', () => {
+  const { context: c } = content();
+  const submitted = c.normalizePromptText('A caveman hunting mammoths --ar 16:9 --seed 52000101');
+  const displayed = c.normalizePromptText('A caveman hunting mammoths');
+  assert.equal(submitted, displayed);
+});
+
 test('a stalled job is warned about once after 90s, not spammed every tick', () => {
   const { context: c, messages } = content();
   c.findErrorBanner = () => null;

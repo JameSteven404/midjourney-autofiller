@@ -79,13 +79,45 @@ function isElementVisible(el) {
   return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
 }
 
+// Midjourney hiển thị seed/ar/… thành chip riêng cạnh ô prompt, KHÔNG kèm
+// trong khối text hiển thị của prompt trong lưới kết quả (đã ghi nhận ở
+// README 1.4.0 khi làm {seed}) — nên phải cắt bỏ phần tham số khỏi văn bản
+// đã gửi trước khi so khớp, giống promptWithoutParams trong background.js
+// (dùng cho tên file). Lặp lại ở đây vì content script và service worker
+// chạy 2 context riêng, không share module.
+function stripPromptParams(text) {
+  const s = String(text || "");
+  const at = s.search(/\s[-–—]{1,2}[a-z]/i);
+  return at > 0 ? s.slice(0, at) : s;
+}
+
 function normalizePromptText(text) {
-  return (text || "")
+  return stripPromptParams(text)
     .replace(/\s+/g, " ")
     .replace(/[“”]/g, '"')
     .replace(/[‘’]/g, "'")
     .trim()
     .toLowerCase();
+}
+
+// SOP đang dùng có prompt dài (700-900 ký tự) — Midjourney nhiều khả năng
+// còn cắt ngắn phần mô tả khi hiển thị gọn trong lưới kết quả, nên đòi khớp
+// đúng nguyên văn tuyệt đối gần như không bao giờ khớp được với prompt dài.
+// Chấp nhận thêm trường hợp candidate (văn bản hiển thị) là phần ĐẦU của
+// target (văn bản đã gửi) — chỉ 1 chiều này hợp lý về vật lý, vì Midjourney
+// chỉ có thể cắt ngắn khi hiển thị, không thể tự thêm chữ. Không chấp nhận
+// chiều ngược lại, vì nếu target ngắn thì nó có thể tình cờ là phần đầu của
+// một candidate dài, KHÔNG liên quan (job khác) đang có sẵn trên trang.
+// Yêu cầu candidate đủ dài (sau khi bỏ "..."/"…" cuối) để không khớp nhầm
+// giữa 2 prompt ngắn khác nhau. Vẫn ưu tiên khớp nguyên văn tuyệt đối khi có
+// (điểm cao hơn) — dùng bởi findGridForText.
+const MIN_PREFIX_MATCH_LEN = 40;
+function promptMatchScore(target, candidate) {
+  if (!candidate) return 0;
+  if (candidate === target) return 1000;
+  const trimmed = candidate.replace(/[.…\s]+$/, "");
+  if (trimmed.length < MIN_PREFIX_MATCH_LEN) return 0;
+  return target.startsWith(trimmed) ? 500 : 0;
 }
 
 function findPromptTextarea() {
@@ -180,8 +212,9 @@ function findGridForText(text, job = {}, snapshots) {
   const ranked = [];
   for (const { grid: g, key, text: candidate } of grids) {
     if (!key || claimedGridKeys.has(key) || job.excludedKeys?.includes(key)) continue;
-    // Similar prefixes are not enough evidence to download this job's images.
-    const score = candidate === target ? 1000 : 0;
+    // Exact match wins when available; a long-enough shared prefix (Midjourney
+    // truncating the description in the grid row) is accepted but scores lower.
+    const score = promptMatchScore(target, candidate);
     if (score > 0) ranked.push({ grid: g, score });
   }
 
@@ -336,7 +369,7 @@ function diagnoseNoMatch(text, snapshots) {
     return `Tìm thấy ${snapshots.length} lưới kết quả nhưng không đọc được nội dung prompt của lưới nào — selector promptText có thể đã đổi.`;
   }
   const target = normalizePromptText(text);
-  if (!snapshots.some((s) => s.text === target)) {
+  if (!snapshots.some((s) => promptMatchScore(target, s.text) > 0)) {
     return `Tìm thấy ${snapshots.length} lưới kết quả (đọc được prompt ở ${withText}) nhưng không cái nào khớp đúng nội dung prompt đã gửi — trang có thể hiển thị prompt khác với nội dung đã gửi.`;
   }
   return "Đã khớp đúng lưới kết quả nhưng ảnh bên trong chưa được tool coi là tải xong hết (thiếu src CDN Midjourney, hoặc naturalWidth = 0) — có thể do mạng chậm hoặc Midjourney đổi cách hiển thị ảnh trong lưới.";

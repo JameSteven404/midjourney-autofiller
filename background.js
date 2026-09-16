@@ -657,8 +657,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     startupReady.then(async () => {
       const state = await getState();
       const item = state.items.find((it) => it.id === msg.requestId);
-      const label = item ? item.text.slice(0, 60) : msg.requestId;
-      await log("error", `Chưa xác nhận được kết quả cho "${label}" sau 90s: ${msg.note}`);
+      // Prompt theo mẫu SOP dài thường chung hệt đoạn mở đầu — cắt 60 ký tự
+      // đầu không phân biệt được job nào, nên ưu tiên hiện seed (khác nhau
+      // mỗi dòng) nếu có, kèm số thứ tự trong hàng đợi.
+      const seed = item ? seedFromPrompt(item.text) : "";
+      const label = item ? (seed ? `#${item.orderIndex} seed ${seed}` : `#${item.orderIndex} ${item.text.slice(0, 60)}`) : msg.requestId;
+      await log("error", `Chưa xác nhận được kết quả cho ${label} sau 90s: ${msg.note}`);
     }).catch(console.error);
     return false;
   }

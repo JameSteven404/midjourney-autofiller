@@ -1,4 +1,17 @@
-# Midjourney Prompt Auto-Filler 1.4.2
+# Midjourney Prompt Auto-Filler 1.4.3
+
+## 1.4.3 (16/09/2026) — tìm ra nguyên nhân thật: so khớp prompt dài kèm --ar/--seed
+
+Cảnh báo chẩn đoán thêm ở bản 1.4.2 phát huy tác dụng ngay: đọc báo cáo JSON thật do người dùng xuất, log mới báo rõ *"Tìm thấy 6 lưới kết quả (đọc được prompt ở 6) nhưng không cái nào khớp đúng nội dung prompt đã gửi"* — tức selector vẫn đúng (đọc được cả 6 lưới), vấn đề nằm ở việc **so khớp văn bản**.
+
+**Nguyên nhân xác định được từ đúng prompt thật trong báo cáo** (SOP đang dùng dài 780-900 ký tự, luôn kèm `--ar 16:9 --seed <số>` ở cuối): `findGridForText` so khớp *nguyên văn tuyệt đối* giữa prompt đã gửi (còn nguyên `--ar/--seed`) và văn bản Midjourney hiển thị trong lưới kết quả. Nhưng Midjourney hiển thị seed/ar thành **chip riêng** cạnh ô prompt (đã ghi nhận từ bản 1.4.0 khi làm `{seed}`), **không hiển thị lại trong khối text của prompt** — nên so nguyên văn gồm cả đoạn tham số sẽ không bao giờ khớp được với prompt dài kiểu này. Việc này từng "có vẻ hoạt động" ở các lần test bằng prompt ngắn (không đại diện cho SOP thật), nên không bị test cũ bắt được.
+
+- **`normalizePromptText` giờ cắt bỏ đoạn tham số** (`--ar 16:9 --seed …`) khỏi prompt đã gửi trước khi so khớp — dùng đúng logic đã kiểm chứng của `promptWithoutParams` trong background.js (chỗ tạo tên file), lặp lại trong content script vì 2 file chạy 2 context riêng.
+- **Chấp nhận thêm trường hợp Midjourney cắt ngắn phần mô tả** khi hiển thị gọn trong lưới (SOP dài 700-900 ký tự rất dễ bị cắt): khớp nếu văn bản hiển thị là phần ĐẦU (đủ dài, ≥40 ký tự) của prompt đã gửi — chỉ 1 chiều này, không chấp nhận chiều ngược lại (tránh prompt ngắn tình cờ khớp nhầm một job dài không liên quan đang có sẵn trên trang).
+- Log cảnh báo chẩn đoán (thêm ở 1.4.2) giờ hiện số thứ tự + seed của job bị kẹt thay vì 60 ký tự đầu — vô nghĩa với SOP này vì mọi prompt đều chung đoạn mở đầu, seed mới là phần phân biệt được.
+- Thêm 3 kiểm thử: cắt tham số trước khi so khớp, khớp đúng khi bị cắt ngắn kèm dấu "...", và đảm bảo prompt ngắn không khớp nhầm một prompt dài không liên quan.
+
+Suy đoán zoom 50% ở bản 1.4.2 (ảnh ngoài khung nhìn không tải) chưa bị loại trừ hẳn — giữ lại vì không hại gì — nhưng theo đúng log thật vừa đọc được, nguyên nhân chính đã xác định là lỗi so khớp văn bản trên, không phải khung nhìn. Cần chạy lại đúng batch đã bị kẹt để xác nhận dứt điểm.
 
 ## 1.4.2 (16/09/2026) — nghi vấn ảnh ngoài khung nhìn không được nhận là đã xong
 
