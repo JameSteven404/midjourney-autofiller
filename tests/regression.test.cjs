@@ -465,13 +465,26 @@ test('restart keeps unconfirmed submit in review instead of submitting twice', a
   assert.equal(b.state().items[0].status, 'review');
 });
 
-test('review blocks further prompts even when configured limit has free slots', async () => {
-  const b = await background({ tabId: 7, maxInFlight: 10, items: [
+test('a review item no longer blocks the rest of the queue or occupies a slot', async () => {
+  const b = await background({ tabId: 7, continuousMode: true, maxInFlight: 10, items: [
     { id: 'one', text: 'first', status: 'review' }, { id: 'two', text: 'second', status: 'pending' }
   ] });
   await b.context.runQueue();
-  assert.equal(b.calls.length, 0);
-  assert.equal(b.state().paused, true);
+  assert.equal(b.calls.length, 1);
+  assert.equal(b.calls[0].requestId, 'two');
+  assert.equal(b.state().paused, false);
+});
+
+test('a timed-out job result is logged and moves that item to review without pausing others still generating', async () => {
+  const b = await background({ tabId: 7, items: [
+    { id: 'one', text: 'first', status: 'generating', tabId: 7 },
+    { id: 'two', text: 'second', status: 'generating', tabId: 7 },
+  ] });
+  await b.context.handleJobResult({ requestId: 'one', ok: false, note: 'Chưa xác nhận tạo xong sau 30 phút' }, { tab: { id: 7 } });
+  assert.equal(b.state().items[0].status, 'review');
+  assert.equal(b.state().items[1].status, 'generating');
+  assert.equal(b.state().paused, false);
+  assert.equal(b.state().logs.some(l => l.level === 'error' && /Chưa xác nhận tạo xong/.test(l.message)), true);
 });
 
 test('parallel START calls cannot submit a prompt twice', async () => {

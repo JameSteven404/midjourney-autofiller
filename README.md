@@ -1,4 +1,17 @@
-# Midjourney Prompt Auto-Filler 1.4.6
+# Midjourney Prompt Auto-Filler 1.4.7
+
+## 1.4.7 (17/09/2026) — 1 job kẹt không còn dừng cả batch hàng trăm prompt
+
+Người dùng báo trực tiếp: chạy batch nhiều prompt thì quá trình tự động dừng lại giữa chừng, không tiếp tục được. Đọc báo cáo JSON thật: log cho thấy nhiều job vượt mốc 30 phút chưa xác nhận được kết quả (`"Chưa xác nhận tạo xong sau 30 phút"`), và cứ hễ có 1 job như vậy là **toàn bộ hàng đợi dừng lại** cho tới khi tự tay xác nhận từng job — với batch hàng trăm prompt, chỉ cần 1 job chậm là cả batch đứng im.
+
+Đã hỏi và xác nhận với người dùng hướng xử lý trước khi sửa (đánh đổi: tự bỏ qua job kẹt và chạy tiếp, thay vì dừng lại chờ xác nhận — chấp nhận rủi ro nhỏ là có thể bỏ lỡ tải ảnh của đúng job đó nếu nó thực ra đã xong, đổi lại không cần người tự canh):
+
+- **1 job "Cần kiểm tra" không còn dừng cả hàng đợi** — bỏ hẳn điều kiện dừng toàn bộ trong `processQueue`; các job khác tiếp tục gửi/theo dõi bình thường, chỉ đúng job đó cần xem lại sau.
+- **"Cần kiểm tra" không còn tính vào số job đang chạy** (`inFlightCount`) — nếu không, mỗi job kẹt sẽ chiếm vĩnh viễn 1 slot trong "Prompt đồng thời", batch càng dài càng hụt dần chỗ trống dù server đã rảnh.
+- **Thời gian chờ trước khi coi là "chưa rõ kết quả" tăng từ 30 phút lên 2 giờ** — người dùng không chắc đang dùng Relax hay Fast; Relax có thể xếp hàng rất lâu khi server đông, không phải lỗi. Trước đây timeout ngắn có giá đắt (dừng cả batch); giờ 1 job timeout chỉ ảnh hưởng đúng job đó, nên chờ lâu hơn trước khi bỏ cuộc an toàn hơn nhiều so với bỏ cuộc sớm rồi mất dấu một job sắp xong.
+- Cập nhật/thêm test cho đúng hành vi mới: review không chặn job khác, không chiếm slot, vẫn ghi log rõ ràng.
+
+Không đổi cách xử lý khi Midjourney báo lỗi/giới hạn thật ngay lúc gửi (banner "queue is full", lỗi debug input...) — các trường hợp đó vẫn dừng hàng đợi để người dùng kiểm tra ngay, vì đó là tín hiệu tức thời đáng tin hơn nhiều so với 1 job im lặng quá lâu.
 
 ## 1.4.6 (16/09/2026) — sửa nhấp nháy hàng đợi lúc gửi prompt/tải ảnh
 

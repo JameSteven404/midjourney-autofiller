@@ -4,7 +4,13 @@
 const SUBMIT_CLEAR_TIMEOUT_MS = 5000;
 const SUBMIT_CLEAR_POLL_MS = 120;
 const WATCHER_INTERVAL_MS = 4000;
-const JOB_TIMEOUT_MS = 30 * 60 * 1000;
+// Relax mode có thể xếp hàng rất lâu khi server đông — job vượt 30 phút vẫn
+// hoàn toàn có thể đang chờ bình thường, không phải kẹt. Trước đây job vượt
+// mốc này bị coi là "review" và DỪNG CẢ HÀNG ĐỢI, nên timeout ngắn từng có
+// cái giá rất đắt. Giờ "review" chỉ để một mình job đó sang bên chờ người
+// dùng kiểm tra, không chặn các job khác — nên chờ lâu hơn trước khi bỏ cuộc
+// an toàn hơn nhiều so với bỏ cuộc sớm rồi mất dấu một job thực ra sắp xong.
+const JOB_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 // Midjourney không thể tạo xong ảnh trong vài giây — một job "xong" gần như
 // ngay sau khi gửi gần chắc chắn là khớp nhầm (vd. lưới cũ, ảnh placeholder
 // mờ trước khi ảnh thật load xong). Chặn dưới này để hàng đợi không tưởng

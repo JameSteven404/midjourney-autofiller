@@ -442,7 +442,12 @@ async function sendToTab(tabId, message) {
 }
 
 function inFlightCount(state) {
-  return state.items.filter(item => ["running", "generating", "review"].includes(item.status)).length;
+  // "review" (chưa xác nhận được kết quả sau thời gian chờ) không còn chiếm
+  // slot — job đó coi như đã rời khỏi Midjourney theo dõi, để dành cho người
+  // dùng kiểm tra thủ công sau, không phải đang thật sự chạy. Không tính vào
+  // đây thì hàng đợi mới không bị hụt dần số chỗ trống qua một batch dài khi
+  // có vài job không xác nhận được.
+  return state.items.filter(item => ["running", "generating"].includes(item.status)).length;
 }
 
 function flightLimit(state) {
@@ -552,10 +557,10 @@ async function processQueue(epoch) {
     while (epoch === queueEpoch) {
       state = await getState();
       if (!state.running || state.paused) break;
-      if (state.items.some(it => it.status === "review")) {
-        await pauseQueue("Có prompt chưa rõ kết quả. Kiểm tra trên Midjourney rồi đánh dấu bỏ qua trước khi tiếp tục.");
-        break;
-      }
+      // Trước đây 1 job "Cần kiểm tra" (chưa xác nhận được kết quả) dừng
+      // TOÀN BỘ hàng đợi cho tới khi người dùng tự bấm xác nhận — với batch
+      // hàng trăm prompt, chỉ cần 1 job chậm/kẹt là cả batch đứng im. Giờ chỉ
+      // job đó cần người dùng xem lại sau; các job khác tiếp tục bình thường.
       const idx = findNextPendingIndex(state);
       if (idx === -1) {
         await setState({ running: false });
@@ -627,7 +632,9 @@ async function handleJobResult(msg, sender) {
   if (!accepted) return;
   wakeQueue();
   await log(msg.ok ? "success" : "error", msg.note || (msg.ok ? "Đã tạo xong ảnh." : "Chưa xác nhận được ảnh."));
-  if (!msg.ok) await pauseQueue(msg.note || "Job cần kiểm tra thủ công trước khi gửi tiếp.");
+  // Không còn dừng cả hàng đợi ở đây — 1 job "review" không nên chặn các
+  // job khác đang chạy tốt. inFlightCount() đã bỏ "review" khỏi số đang
+  // chạy nên slot của job này được nhường ngay cho prompt tiếp theo.
   if (msg.ok && state.autoDownload && msg.mediaUrls?.length) {
     await downloadMedia(msg.mediaUrls, item.text, state.downloadSubfolder, item.id, completedAt,
       item.orderIndex, state.filenameTemplate);
